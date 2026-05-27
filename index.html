@@ -5,26 +5,41 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>FPSS — Fixed Point Storage System</title>
 <!--
-  FPSS — Fixed Point Storage System v0.4
-  ConsciousNode SoftWorks · 2026-05-26
+  FPSS — Fixed Point Storage System v0.5
+  ConsciousNode SoftWorks · 2026-05-27
 
-  v0.4 — spec gap closure:
-    BitNet b1.58 ternary packing  §1.3
-      Float32[128] → packed Uint8[32] — 16x fingerprint index reduction
-      Encoding: {-1→00, 0→01, 1→10}, 4 values/byte
-      fps_encoding: 'ternary-b1.58' in header
-    Type-aware routing            §8.1
-      text/code/structured → ROSA fingerprint + full text
-      image/* → passthrough + ElasticTok pathway note (pending)
-      audio/* → passthrough + SpikeVox pathway note (pending)
-      binary / unknown → passthrough (no compression penalty)
-      routing_log in header
-    `contents` header field       §4
-      Data type summary: {text:N, json:N, binary:N, image:N, audio:N}
-    OOMB-style chunked ingest     §1.4
-      Fingerprints computed one chunk at a time, Float32 discarded
-      after packing — no full fp[] array held in memory simultaneously
-      Yields to event loop between chunks
+  v0.5 — omnimodal fingerprinting (getting close to v1):
+    ElasticTok image pathway     §8.1
+      Canvas decode → 16×16 spatial patch grid
+      RGB means → quantized token sequence [0–127]
+      computeFPFromToks → ROSA histogram → ternary-b1.58
+      SheafMemory label: 'image'. Searchable via query.
+      Thumbnail (80px JPEG) stored for browse + query preview.
+    SpikeVox audio pathway       §8.1
+      Web Audio API decode → PCM chunks
+      LIF membrane integration (V_th=3.5, leak=0.95, refractory=2)
+      Spike features → computeFPFromToks → ROSA → ternary-b1.58
+      SheafMemory label: 'audio'. Searchable via query.
+      Duration + total spike count stored.
+    Neural weights pathway       §8.1
+      Detects: .bin .pt .pth .safetensors .gguf .ckpt
+      Float32 sampling → quantized toks → ROSA fingerprint
+      b1.58 compression ratio computed and displayed
+      SheafMemory label: 'weights'. Searchable via query.
+    computeFPFromToks()
+      Shared fingerprint primitive used by all four routes.
+      Text: char codes → toks
+      Image: patch RGB means → toks
+      Audio: LIF spike rate features → toks
+      Weights: sampled Float32 magnitudes → toks
+    Passthrough now truly unstructured binary only.
+    Seed reader updated: thumbnails, audio stats, weights stats.
+
+  v0.4 (2026-05-26):
+    BitNet b1.58 ternary packing §1.3
+    Type-aware routing           §8.1
+    contents header field        §4
+    OOMB-style chunked ingest    §1.4
 
   Architecture:
     ROSA suffix automaton    — fingerprinting layer
@@ -36,15 +51,17 @@
     .cns seed reader         — self-drawing window, fully featured
 
   Credits:
-    ROSA / SheafMemory: ConsciousNode/Simulacra
-                        (Kehai Interim, Ed Interim, Vael Interim)
-    FPSS v0.4: Kham Kizer · Kehai Interim · 2026-05-26
+    ROSA / SheafMemory: ConsciousNode/Simulacra (Kehai Interim, Ed Interim, Vael Interim)
+    SpikeVox v2: Kehai Interim / Phase 2 (ported from Simulacra)
+    ElasticTok v2: Kehai Interim / Phase 3 (spatial variant for static images)
+    FPSS v0.5: Kham Kizer · Kehai Interim · 2026-05-27
 -->
 <style>
 :root{
   --bg:#0b0a0f;--bg2:#131120;--bg3:#1a1829;--border:#2a2640;
   --amber:#c89b4a;--adim:#7a5e28;--aglow:rgba(200,155,74,.10);
   --teal:#4ab8c8;--tdim:#2a6e7a;--tglow:rgba(74,184,200,.08);
+  --violet:#a78bfa;--vdim:#4a3a7a;--vglow:rgba(167,139,250,.08);
   --text:#e4dff0;--muted:#7a7498;--err:#f87171;--ok:#86efac;--warn:#fbbf24;
   --mono:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;
   --sans:system-ui,-apple-system,BlinkMacSystemFont,sans-serif;
@@ -52,54 +69,99 @@
 }
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px;overflow:hidden;}
-::-webkit-scrollbar{width:5px;height:5px;}
+::-webkit-scrollbar{width:4px;height:4px;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px;}
 ::-webkit-scrollbar-thumb:hover{background:var(--muted);}
-#app{display:flex;flex-direction:column;height:100vh;}
-header{display:flex;align-items:center;gap:14px;padding:11px 22px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;z-index:10;}
-.logo{font-family:var(--mono);font-size:17px;font-weight:800;color:var(--amber);letter-spacing:-.5px;}
-.logo-sub{font-size:10px;color:var(--muted);margin-top:1px;}
-.h1-pill{margin-left:auto;display:flex;align-items:center;gap:7px;font-family:var(--mono);font-size:10px;font-weight:700;color:var(--amber);background:var(--aglow);border:1px solid var(--adim);padding:5px 13px;border-radius:20px;}
+
+/* ── App shell ───────────────────────────────────────────── */
+#app{display:flex;flex-direction:column;height:100dvh;}
+
+/* ── Header ─────────────────────────────────────────────── */
+header{display:flex;align-items:center;gap:10px;padding:9px 16px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;z-index:20;}
+.logo{font-family:var(--mono);font-size:15px;font-weight:800;color:var(--amber);letter-spacing:-.5px;white-space:nowrap;}
+.logo-sub{font-size:9px;color:var(--muted);margin-top:1px;white-space:nowrap;}
+.h1-pill{margin-left:auto;display:flex;align-items:center;gap:6px;font-family:var(--mono);font-size:9px;font-weight:700;color:var(--amber);background:var(--aglow);border:1px solid var(--adim);padding:4px 10px;border-radius:20px;white-space:nowrap;}
 .h1-pill.contra{color:var(--err);border-color:#7a2828;background:rgba(248,113,113,.08);}
-.h1-dot{width:7px;height:7px;border-radius:50%;background:currentColor;box-shadow:0 0 8px currentColor;}
-@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.5;transform:scale(.85)}}
+.h1-dot{width:6px;height:6px;border-radius:50%;background:currentColor;box-shadow:0 0 6px currentColor;}
+@keyframes pulse{0%,100%{opacity:1;transform:scale(1)}50%{opacity:.4;transform:scale(.8)}}
 .h1-dot{animation:pulse 2.4s infinite;}
-.main-row{display:flex;flex:1;overflow:hidden;}
-aside{width:224px;flex-shrink:0;display:flex;flex-direction:column;background:var(--bg2);border-right:1px solid var(--border);overflow:hidden;}
-.aside-head{padding:10px 16px;font-family:var(--mono);font-size:9px;font-weight:700;color:var(--muted);letter-spacing:.4em;text-transform:uppercase;border-bottom:1px solid var(--border);flex-shrink:0;}
+
+/* sidebar toggle (mobile only) */
+#sidebar-toggle{display:none;background:none;border:none;color:var(--muted);font-size:18px;cursor:pointer;padding:2px 4px;line-height:1;flex-shrink:0;}
+#sidebar-toggle:hover{color:var(--text);}
+
+/* ── Main row ────────────────────────────────────────────── */
+.main-row{display:flex;flex:1;overflow:hidden;position:relative;}
+
+/* ── Sidebar ─────────────────────────────────────────────── */
+aside{
+  width:210px;flex-shrink:0;display:flex;flex-direction:column;
+  background:var(--bg2);border-right:1px solid var(--border);overflow:hidden;
+  transition:transform var(--fast),width var(--fast);
+}
+.aside-head{padding:9px 14px;font-family:var(--mono);font-size:9px;font-weight:700;color:var(--muted);letter-spacing:.4em;text-transform:uppercase;border-bottom:1px solid var(--border);flex-shrink:0;}
 .file-list{flex:1;overflow-y:auto;}
-.fi{padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border);transition:background var(--fast);display:flex;align-items:center;gap:7px;}
+.fi{padding:8px 10px;cursor:pointer;border-bottom:1px solid var(--border);transition:background var(--fast);display:flex;align-items:center;gap:6px;}
 .fi:hover,.fi.sel{background:var(--bg3);}
 .fi.sel .fn{color:var(--amber);}
 .fi-info{flex:1;min-width:0;}
 .fn{font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
-.fm{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:2px;}
+.fm{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:1px;}
 .route-badge{font-family:var(--mono);font-size:8px;padding:1px 5px;border-radius:4px;border:1px solid;flex-shrink:0;}
 .rb-text{color:#86efac;border-color:#2a5a3a;background:rgba(134,239,172,.06);}
 .rb-json{color:#4ab8c8;border-color:#2a6e7a;background:rgba(74,184,200,.06);}
-.rb-binary{color:#7a7498;border-color:#3a3560;background:transparent;}
 .rb-image{color:var(--warn);border-color:#6a5020;background:rgba(251,191,36,.06);}
 .rb-audio{color:var(--warn);border-color:#6a5020;background:rgba(251,191,36,.06);}
-.icon-btn{font-size:12px;color:var(--muted);cursor:pointer;flex-shrink:0;opacity:.5;transition:opacity var(--fast);padding:2px 3px;background:none;border:none;}
+.rb-weights{color:var(--violet);border-color:var(--vdim);background:var(--vglow);}
+.rb-binary{color:var(--muted);border-color:#3a3560;background:transparent;}
+.icon-btn{font-size:11px;color:var(--muted);cursor:pointer;flex-shrink:0;opacity:.45;transition:opacity var(--fast);padding:3px;background:none;border:none;line-height:1;}
 .icon-btn:hover{opacity:1;}
 .icon-btn.dl:hover{color:var(--teal);}
 .icon-btn.rm:hover{color:var(--err);}
-.fl-empty{padding:24px 14px;text-align:center;color:var(--muted);font-size:11px;line-height:1.7;}
-.drop-zone{margin:10px;flex-shrink:0;border:1px dashed var(--border);border-radius:var(--r);padding:13px 10px;text-align:center;cursor:pointer;transition:all var(--fast);}
+.fl-empty{padding:20px 12px;text-align:center;color:var(--muted);font-size:11px;line-height:1.7;}
+.drop-zone{margin:8px;flex-shrink:0;border:1px dashed var(--border);border-radius:var(--r);padding:11px 8px;text-align:center;cursor:pointer;transition:all var(--fast);}
 .drop-zone:hover,.drop-zone.over{border-color:var(--amber);background:var(--aglow);}
-.dz-icon{font-size:18px;margin-bottom:3px;opacity:.5;}
+.dz-icon{font-size:16px;margin-bottom:2px;opacity:.45;}
 .dz-text{font-size:10px;color:var(--muted);line-height:1.5;}
+
+/* ── Main content ────────────────────────────────────────── */
 main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
-.tab-bar{display:flex;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;}
-.tab{padding:10px 16px;cursor:pointer;font-size:11px;font-weight:700;color:var(--muted);border-bottom:2px solid transparent;transition:all var(--fast);user-select:none;}
+.tab-bar{display:flex;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0;overflow-x:auto;scrollbar-width:none;}
+.tab-bar::-webkit-scrollbar{display:none;}
+.tab{padding:9px 14px;cursor:pointer;font-size:11px;font-weight:700;color:var(--muted);border-bottom:2px solid transparent;transition:all var(--fast);user-select:none;white-space:nowrap;flex-shrink:0;}
 .tab:hover{color:var(--text);}
 .tab.on{color:var(--amber);border-bottom-color:var(--amber);}
 .panel{display:none;flex-direction:column;flex:1;overflow:hidden;}
 .panel.on{display:flex;}
-.scroll{flex:1;overflow-y:auto;padding:18px 22px;}
+.scroll{flex:1;overflow-y:auto;padding:14px 18px;}
 .sec-lbl{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.35em;text-transform:uppercase;margin-bottom:10px;}
-.qhead{padding:15px 22px 11px;border-bottom:1px solid var(--border);flex-shrink:0;}
+.qhead{padding:12px 18px 10px;border-bottom:1px solid var(--border);flex-shrink:0;}
+
+/* ── Mobile sidebar overlay ──────────────────────────────── */
+#sidebar-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:30;}
+
+/* ── Mobile breakpoint ───────────────────────────────────── */
+@media(max-width:639px){
+  #sidebar-toggle{display:block;}
+  .logo-sub{display:none;}
+  .h1-pill{font-size:8px;padding:3px 8px;}
+  aside{
+    position:fixed;left:0;top:0;bottom:0;z-index:40;
+    transform:translateX(-100%);width:min(80vw,260px);
+    border-right:1px solid var(--border);
+    box-shadow:4px 0 24px rgba(0,0,0,.5);
+  }
+  aside.open{transform:translateX(0);}
+  #sidebar-backdrop.open{display:block;}
+  .tab{padding:8px 11px;font-size:10px;}
+  .scroll{padding:10px 12px;}
+  .qhead{padding:10px 12px 9px;}
+  .status-bar{padding:6px 12px;font-size:9px;gap:8px;}
+  .status-bar .spacer{display:none;}
+  .status-bar .btn{font-size:9px;padding:5px 9px;}
+  .stat-grid{grid-template-columns:1fr 1fr;}
+}
 .qrow{display:flex;gap:8px;}
 input.qi{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px 13px;font-size:13px;color:var(--text);font-family:var(--sans);outline:none;transition:border-color var(--fast);}
 input.qi:focus{border-color:var(--teal);}
@@ -112,6 +174,7 @@ input.qi::placeholder{color:var(--muted);}
 .r-file{font-family:var(--mono);font-size:10px;font-weight:700;color:var(--teal);}
 .r-score{margin-left:auto;font-family:var(--mono);font-size:9px;color:var(--amber);background:var(--aglow);border:1px solid var(--adim);padding:2px 7px;border-radius:8px;}
 .r-text{font-size:12px;color:var(--text);line-height:1.65;}
+.r-thumb{width:72px;height:48px;object-fit:cover;border-radius:4px;border:1px solid var(--border);flex-shrink:0;margin-top:5px;}
 .r-pr{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:4px;}
 .empty-msg{text-align:center;color:var(--muted);padding:48px 0;font-size:13px;line-height:1.8;}
 .bwrap{display:flex;flex:1;overflow:hidden;}
@@ -128,6 +191,10 @@ input.qi::placeholder{color:var(--muted);}
 .chunk-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px 11px;margin-bottom:7px;font-size:12px;line-height:1.7;color:var(--text);white-space:pre-wrap;word-break:break-word;}
 .cnum{font-family:var(--mono);font-size:9px;color:var(--muted);margin-bottom:3px;}
 .passthrough-note{background:rgba(251,191,36,.06);border:1px solid #6a5020;border-radius:var(--r);padding:12px 14px;font-size:11px;color:var(--warn);line-height:1.6;}
+.media-card{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;font-size:11px;line-height:1.8;color:var(--text);}
+.media-card img{display:block;max-width:100%;border-radius:5px;margin-bottom:10px;border:1px solid var(--border);}
+.media-stat{font-family:var(--mono);font-size:10px;color:var(--muted);}
+.media-stat span{color:var(--amber);}
 .contra-card{background:var(--bg2);border:1px solid #4a2828;border-radius:var(--r);padding:10px 12px;margin-bottom:8px;}
 .contra-norm{font-family:var(--mono);font-size:10px;color:var(--err);margin-bottom:5px;}
 .contra-pair{display:flex;gap:7px;}
@@ -136,7 +203,6 @@ input.qi::placeholder{color:var(--muted);}
 #pc-canvas{display:block;width:100%;max-width:360px;margin:0 auto;}
 .pc-legend{display:flex;gap:14px;justify-content:center;margin-top:7px;font-family:var(--mono);font-size:9px;color:var(--muted);}
 .ld{display:inline-block;width:7px;height:7px;border-radius:50%;margin-right:4px;}
-/* routing table */
 .route-table{width:100%;border-collapse:collapse;font-size:11px;margin-top:8px;}
 .route-table th{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.2em;text-transform:uppercase;padding:6px 10px;border-bottom:1px solid var(--border);text-align:left;}
 .route-table td{padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top;}
@@ -145,7 +211,6 @@ input.qi::placeholder{color:var(--muted);}
 .rt-active{color:var(--ok);}
 .rt-pending{color:var(--warn);}
 .rt-pass{color:var(--muted);}
-/* stats panel */
 .stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;}
 .stat-box{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px;}
 .stat-label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.2em;text-transform:uppercase;margin-bottom:5px;}
@@ -174,16 +239,18 @@ input.mi:focus{border-color:var(--amber);}
 <body>
 <div id="app">
   <header>
-    <div><div class="logo">FPSS</div><div class="logo-sub">Fixed Point Storage System · ConsciousNode SoftWorks · v0.4</div></div>
+    <button id="sidebar-toggle" onclick="toggleSidebar()" title="Files">☰</button>
+    <div><div class="logo">FPSS</div><div class="logo-sub">Fixed Point Storage System · ConsciousNode SoftWorks · v0.5</div></div>
     <div class="h1-pill" id="h1-pill"><div class="h1-dot"></div><span id="h1-txt">H¹(ℱ) = 0.000</span></div>
   </header>
+  <div id="sidebar-backdrop" onclick="closeSidebar()"></div>
   <div class="main-row">
-    <aside>
+    <aside id="sidebar">
       <div class="aside-head">Archive</div>
       <div class="file-list" id="file-list"><div class="fl-empty">No files ingested yet.</div></div>
       <div class="drop-zone" id="dz">
         <div class="dz-icon">⊕</div>
-        <div class="dz-text">Drop or click · all file types<br>text routed · binary passthrough</div>
+        <div class="dz-text">Drop or click · all file types<br>text · image · audio · weights routed</div>
         <input id="fi" type="file" multiple style="display:none">
       </div>
     </aside>
@@ -195,7 +262,6 @@ input.mi:focus{border-color:var(--amber);}
         <div class="tab" onclick="sw('contra')">Contradictions</div>
         <div class="tab" onclick="sw('sheaf')">Sheaf</div>
       </div>
-      <!-- Query -->
       <div class="panel on" id="p-query">
         <div class="qhead">
           <div class="sec-lbl" style="margin-bottom:7px;">Ask the archive</div>
@@ -207,7 +273,6 @@ input.mi:focus{border-color:var(--amber);}
         </div>
         <div class="scroll" id="r-q"><div class="empty-msg">Ingest files, then ask the archive anything.<br><span style="font-size:11px;opacity:.5">You don't decompress it. You ask it things.</span></div></div>
       </div>
-      <!-- Browse -->
       <div class="panel" id="p-browse">
         <div class="bwrap">
           <div class="blist" id="bl"></div>
@@ -220,7 +285,6 @@ input.mi:focus{border-color:var(--amber);}
           </div>
         </div>
       </div>
-      <!-- Routing -->
       <div class="panel" id="p-routing">
         <div class="scroll">
           <div class="sec-lbl">Storage Statistics</div>
@@ -235,20 +299,18 @@ input.mi:focus{border-color:var(--amber);}
             <tr><th>Type</th><th>Route</th><th>Status</th></tr>
             <tr><td class="rt-type">text · code · log</td><td>ROSA fingerprint + full text</td><td class="rt-active">✓ active</td></tr>
             <tr><td class="rt-type">JSON · CSV · YAML</td><td>ROSA fingerprint + full text</td><td class="rt-active">✓ active</td></tr>
-            <tr><td class="rt-type">image/*</td><td>ElasticTok delta-patch</td><td class="rt-pending">⊙ pending v1</td></tr>
-            <tr><td class="rt-type">audio/*</td><td>SpikeVox → .pop2</td><td class="rt-pending">⊙ pending v1</td></tr>
-            <tr><td class="rt-type">neural weights</td><td>BitNet b1.58 ternary</td><td class="rt-pending">⊙ pending v1</td></tr>
+            <tr><td class="rt-type">image/*</td><td>ElasticTok spatial patches → ternary-b1.58</td><td class="rt-active">✓ active v0.5</td></tr>
+            <tr><td class="rt-type">audio/*</td><td>SpikeVox LIF → spike features → ternary-b1.58</td><td class="rt-active">✓ active v0.5</td></tr>
+            <tr><td class="rt-type">neural weights</td><td>Float32 sampling → BitNet b1.58 ternary</td><td class="rt-active">✓ active v0.5</td></tr>
             <tr><td class="rt-type">binary · unknown</td><td>Passthrough (1:1)</td><td class="rt-pass">→ passthrough</td></tr>
           </table>
           <div class="sec-lbl" style="margin-top:16px;">Ingested Files by Route</div>
           <div id="route-breakdown"></div>
         </div>
       </div>
-      <!-- Contradictions -->
       <div class="panel" id="p-contra">
         <div class="scroll" id="r-contra"><div class="empty-msg">No contradictions yet.</div></div>
       </div>
-      <!-- Sheaf -->
       <div class="panel" id="p-sheaf">
         <div class="scroll">
           <div class="sec-lbl">Poincaré Ball — Context Positions</div>
@@ -280,7 +342,7 @@ input.mi:focus{border-color:var(--amber);}
 <div class="overlay" id="m-exp">
   <div class="modal">
     <div class="modal-title">Export Archive · .cns</div>
-    <div class="modal-note">Exports a self-contained HTML archive with embedded seed reader. All file types stored — text searchable, binary extractable. Add a passphrase for <strong style="color:var(--amber)">keyed mode</strong>.</div>
+    <div class="modal-note">Exports a self-contained HTML archive with embedded seed reader. All file types stored — text searchable, images/audio/weights indexed, binary extractable. Add a passphrase for <strong style="color:var(--amber)">keyed mode</strong>.</div>
     <input class="mi" id="exp-name" type="text" placeholder="archive name">
     <input class="mi" id="exp-key" type="password" placeholder="passphrase (optional — keyed mode)">
     <div class="modal-row"><button class="btn btn-g" onclick="closeAll()">Cancel</button><button class="btn btn-a" onclick="doExp()">Export</button></div>
@@ -312,7 +374,7 @@ function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;co
    ═══════════════════════════════════════════════════════════ */
 const THRESH=0.5;
 class SheafMemory{
-  constructor(dim){this.dim=dim;this.contexts=[];this.max=192;this.lastNorm=0;this.totalC=0;this._step=0;this._rm={};}
+  constructor(dim){this.dim=dim;this.contexts=[];this.max=256;this.lastNorm=0;this.totalC=0;this._step=0;this._rm={};}
   _rmap(a,b){if(a===b)return null;const k=a+'→'+b;if(!this._rm[k])this._rm[k]={s:new Float32Array(this.dim).fill(1),bi:new Float32Array(this.dim).fill(0)};return this._rm[k];}
   _res(v,a,b){const m=this._rmap(a,b);if(!m)return v;const o=new Float32Array(this.dim);for(let i=0;i<this.dim;i++)o[i]=m.s[i]*v[i]+m.bi[i];return o;}
   _fr(a,b){let s=0;const d=Math.min(a.vec.length,b.vec.length);for(let k=0;k<d;k++){const dd=a.vec[k]-b.vec[k];s+=(dd*dd)/((a.vr[k]+b.vr[k])+1e-6);}return Math.sqrt(s/d);}
@@ -327,43 +389,42 @@ class SheafMemory{
 }
 
 /* ═══════════════════════════════════════════════════════════
-   ROSA Fingerprinter
+   ROSA Fingerprinter — shared primitive for all routes
+   computeFPFromToks: the core pipeline, reused by text/image/audio/weights
    ═══════════════════════════════════════════════════════════ */
 const VOCAB=128;
-function computeFP(text){
-  const t=text.slice(0,1024),toks=[];
-  for(let i=0;i<t.length;i++)toks.push(Math.min(127,t.charCodeAt(i)));
+
+function computeFPFromToks(toks){
   if(toks.length<2)return new Float32Array(VOCAB);
   const preds=ROSA(toks),hist=new Float32Array(VOCAB);
   for(const p of preds)if(p>=0&&p<VOCAB)hist[p]++;
-  for(const tok of toks)hist[tok]+=.1;
+  for(const tok of toks)if(tok>=0&&tok<VOCAB)hist[tok]+=.1;
   let norm=0;for(let i=0;i<VOCAB;i++)norm+=hist[i]**2;
   norm=Math.sqrt(norm)+1e-8;
   for(let i=0;i<VOCAB;i++)hist[i]/=norm;
   return hist;
 }
 
+function computeFP(text){
+  const t=text.slice(0,1024),toks=[];
+  for(let i=0;i<t.length;i++)toks.push(Math.min(127,t.charCodeAt(i)));
+  return computeFPFromToks(toks);
+}
+
 /* ═══════════════════════════════════════════════════════════
    BitNet b1.58 ternary packing  §1.3
-   Quantize Float32[128] → Uint8[32]
-   Encoding: threshold at ±0.15 relative to mean
-     negative  → 0b00
-     zero      → 0b01
-     positive  → 0b10
-   4 values packed per byte (bits 7-6, 5-4, 3-2, 1-0)
-   128 values × 2 bits = 32 bytes = 16× reduction vs Float32
+   Float32[128] → Uint8[32] — 16× reduction vs Float32
+   Encoding: {-1→0b00, 0→0b01, 1→0b10}, 4 values/byte
    ═══════════════════════════════════════════════════════════ */
 function ternaryPack(fp32){
-  // Compute mean for threshold
-  let mean=0;for(let i=0;i<fp32.length;i++)mean+=fp32[i];
-  mean/=fp32.length;
+  let mean=0;for(let i=0;i<fp32.length;i++)mean+=fp32[i];mean/=fp32.length;
   const threshold=0.15*Math.max(...fp32);
   const packed=new Uint8Array(32);
   for(let i=0;i<128;i+=4){
     let byte=0;
     for(let j=0;j<4;j++){
       const v=fp32[i+j]-mean;
-      const q=v< -threshold?0b00:v>threshold?0b10:0b01;
+      const q=v<-threshold?0b00:v>threshold?0b10:0b01;
       byte|=(q<<((3-j)*2));
     }
     packed[i>>2]=byte;
@@ -372,7 +433,6 @@ function ternaryPack(fp32){
 }
 
 function ternaryUnpack(packed){
-  const mean=0; // mean removed at pack time; relative distances preserved
   const fp=new Float32Array(128);
   for(let i=0;i<32;i++){
     const byte=packed[i];
@@ -381,7 +441,6 @@ function ternaryUnpack(packed){
       fp[i*4+j]=q===0b00?-1:q===0b10?1:0;
     }
   }
-  // L2 normalise for retrieval
   let norm=0;for(let i=0;i<128;i++)norm+=fp[i]**2;
   norm=Math.sqrt(norm)+1e-8;
   for(let i=0;i<128;i++)fp[i]/=norm;
@@ -389,26 +448,191 @@ function ternaryUnpack(packed){
 }
 
 /* ═══════════════════════════════════════════════════════════
+   SpikeVox v2 — Leaky Integrate-and-Fire audio encoder
+   Ported from ConsciousNode/Simulacra (Kehai Interim / Phase 2)
+   Biological LIF model for raw waveform processing.
+   No Mel, no VQ-VAE, no phase destruction.
+   ═══════════════════════════════════════════════════════════ */
+class SpikeVox{
+  constructor(threshold=3.5,leakRate=0.95,refractoryPeriod=2){
+    this.threshold=threshold;this.leakRate=leakRate;this.refractoryPeriod=refractoryPeriod;
+    this.membrane=null;this.refractory=null;this.dim=0;
+    this.totalSpikes=0;this.totalSteps=0;this.firingRate=0;
+  }
+  _ensureState(dim){
+    if(this.dim===dim)return;
+    this.dim=dim;this.membrane=new Float32Array(dim);this.refractory=new Int32Array(dim);
+  }
+  /* LIF step: V[i] = leak*V[i] + input[i]; fire if V[i] >= threshold */
+  step(rawFeatures){
+    this._ensureState(rawFeatures.length);
+    const spikes=new Int8Array(this.dim);let spikeCount=0;
+    for(let i=0;i<this.dim;i++){
+      if(this.refractory[i]>0){this.refractory[i]--;this.membrane[i]=0;continue;}
+      this.membrane[i]=this.leakRate*this.membrane[i]+rawFeatures[i];
+      if(this.membrane[i]>=this.threshold){spikes[i]=1;this.membrane[i]=0;this.refractory[i]=this.refractoryPeriod;spikeCount++;}
+    }
+    this.totalSpikes+=spikeCount;this.totalSteps++;
+    this.firingRate=0.95*this.firingRate+0.05*(spikeCount/this.dim);
+    return{spikes,spikeCount};
+  }
+  /* Per-neuron temporal band energy + ZCR + RMS — spectrogram-free */
+  extractFeatures(pcmBuffer){
+    const dim=this.dim||64;const features=new Float32Array(dim);
+    const step=Math.floor(pcmBuffer.length/dim);
+    for(let i=0;i<dim-2;i++){
+      const base=i*step;let s=0;
+      for(let j=0;j<step&&base+j<pcmBuffer.length;j++)s+=Math.abs(pcmBuffer[base+j]);
+      features[i]=s/Math.max(1,step);
+    }
+    let zcr=0;for(let i=1;i<pcmBuffer.length;i++)if((pcmBuffer[i]>=0)!==(pcmBuffer[i-1]>=0))zcr++;
+    features[dim-2]=zcr/pcmBuffer.length;
+    let energy=0;for(let i=0;i<pcmBuffer.length;i++)energy+=pcmBuffer[i]**2;
+    features[dim-1]=Math.sqrt(energy/pcmBuffer.length);
+    return features;
+  }
+  /* Rate coding: EMA accumulator → dense feature vector [0,1] */
+  spikesToFeatures(spikes,acc){
+    for(let i=0;i<this.dim;i++)acc[i]=0.9*acc[i]+spikes[i];
+    let max=0;for(let i=0;i<this.dim;i++)if(acc[i]>max)max=acc[i];
+    const features=new Float32Array(this.dim);
+    if(max>0)for(let i=0;i<this.dim;i++)features[i]=acc[i]/max;
+    return features;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Image fingerprinting — ElasticTok spatial variant
+   For static images (no temporal delta), all patches are salient.
+   16×16 patch grid → RGB means → quantized toks [0–127] → ROSA
+   Also generates an 80px thumbnail for browse/query preview.
+   ═══════════════════════════════════════════════════════════ */
+function fingerprintImage(file){
+  return new Promise(resolve=>{
+    const url=URL.createObjectURL(file);
+    const img=new Image();
+    img.onload=()=>{
+      const W=Math.min(img.naturalWidth,256),H=Math.min(img.naturalHeight,256);
+      const c=document.createElement('canvas');c.width=W;c.height=H;
+      const ctx=c.getContext('2d');ctx.drawImage(img,0,0,W,H);
+      // Thumbnail
+      const tw=80,th=Math.max(1,Math.round(tw*H/W));
+      const tc=document.createElement('canvas');tc.width=tw;tc.height=th;
+      tc.getContext('2d').drawImage(img,0,0,tw,th);
+      const thumbnail=tc.toDataURL('image/jpeg',0.65);
+      URL.revokeObjectURL(url);
+      const pixels=ctx.getImageData(0,0,W,H).data;
+      const ps=16,gridW=Math.floor(W/ps),gridH=Math.floor(H/ps);
+      const toks=[];
+      for(let pr=0;pr<gridH&&toks.length<1020;pr++){
+        for(let pc=0;pc<gridW&&toks.length<1020;pc++){
+          let rS=0,gS=0,bS=0,n=0;
+          for(let y=pr*ps;y<Math.min((pr+1)*ps,H);y++)
+            for(let x=pc*ps;x<Math.min((pc+1)*ps,W);x++){
+              const p=(y*W+x)*4;rS+=pixels[p];gS+=pixels[p+1];bS+=pixels[p+2];n++;
+            }
+          toks.push(Math.min(127,rS/n>>1));
+          toks.push(Math.min(127,gS/n>>1));
+          toks.push(Math.min(127,bS/n>>1));
+        }
+      }
+      const fp=computeFPFromToks(toks);
+      const packed=ternaryPack(fp);
+      resolve({fp,packed,thumbnail,gridW,gridH,W,H});
+    };
+    img.onerror=()=>{URL.revokeObjectURL(url);resolve(null);};
+    img.src=url;
+  });
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Audio fingerprinting — SpikeVox LIF pathway
+   Web Audio API decode → PCM chunks → LIF → spike rate features
+   → quantized toks → ROSA fingerprint
+   ═══════════════════════════════════════════════════════════ */
+async function fingerprintAudio(file){
+  try{
+    const buf=await file.arrayBuffer();
+    const AudioCtx=window.AudioContext||window.webkitAudioContext;
+    if(!AudioCtx)return null;
+    const ctx=new AudioCtx();
+    let audioBuffer;
+    try{audioBuffer=await ctx.decodeAudioData(buf.slice(0));}
+    finally{ctx.close();}
+    const pcm=audioBuffer.getChannelData(0);
+    const duration=audioBuffer.duration;
+    const sr=audioBuffer.sampleRate;
+    const sv=new SpikeVox(3.5,0.95,2);sv._ensureState(64);
+    const acc=new Float32Array(64);const toks=[];
+    const chunkSz=512;
+    for(let i=0;i<pcm.length&&toks.length<1020;i+=chunkSz){
+      const chunk=pcm.slice(i,i+chunkSz);
+      const feats=sv.extractFeatures(chunk);
+      const{spikes}=sv.step(feats);
+      const sfeats=sv.spikesToFeatures(spikes,acc);
+      // 4 sampled values per chunk for token stream
+      for(let j=0;j<4;j++)toks.push(Math.min(127,Math.round(sfeats[j*16]*127)));
+    }
+    const fp=computeFPFromToks(toks);
+    const packed=ternaryPack(fp);
+    return{fp,packed,duration,sampleRate:sr,totalSpikes:sv.totalSpikes};
+  }catch{return null;}
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Weights fingerprinting — BitNet b1.58 pathway
+   Float32 sampling → magnitude quantization [0–127] → ROSA
+   Also computes theoretical b1.58 compression ratio.
+   Handles safetensors header offset.
+   ═══════════════════════════════════════════════════════════ */
+async function fingerprintWeights(file){
+  try{
+    const buf=await file.arrayBuffer();
+    const ext=file.name.split('.').pop().toLowerCase();
+    let floats;
+    if(ext==='safetensors'){
+      // safetensors: first 8 bytes = little-endian u64 header length
+      const view=new DataView(buf);
+      const headerLen=Number(view.getBigUint64(0,true));
+      floats=new Float32Array(buf.slice(8+headerLen));
+    }else{
+      floats=new Float32Array(buf);
+    }
+    const numParams=floats.length;
+    if(numParams<4)return null;
+    const step=Math.max(1,Math.floor(numParams/1024));
+    const toks=[];
+    for(let i=0;i<numParams&&toks.length<1024;i+=step){
+      const v=floats[i];
+      if(!isFinite(v))continue;
+      toks.push(Math.min(127,Math.max(0,Math.round(Math.abs(v)*40))));
+    }
+    const fp=computeFPFromToks(toks);
+    const packed=ternaryPack(fp);
+    // b1.58: 128-float blocks → 32 bytes each
+    const blocks=Math.floor(numParams/128);
+    const ternaryBytes=blocks*32;
+    const float32Bytes=numParams*4;
+    const ratio=ternaryBytes>0?(float32Bytes/ternaryBytes).toFixed(1)+'×':'—';
+    return{fp,packed,numParams,ternaryBytes,float32Bytes,ratio};
+  }catch{return null;}
+}
+
+/* ═══════════════════════════════════════════════════════════
    Type-aware routing  §8.1
    ═══════════════════════════════════════════════════════════ */
-const ROUTE_TEXT   ='text';
-const ROUTE_JSON   ='json';
-const ROUTE_BINARY ='binary';
-const ROUTE_IMAGE  ='image';
-const ROUTE_AUDIO  ='audio';
+const ROUTE_TEXT='text',ROUTE_JSON='json',ROUTE_BINARY='binary';
+const ROUTE_IMAGE='image',ROUTE_AUDIO='audio',ROUTE_WEIGHTS='weights';
 
-function detectRoute(filename, mimeType){
+function detectRoute(filename,mimeType){
   const ext=filename.split('.').pop().toLowerCase();
   if(mimeType.startsWith('image/'))return ROUTE_IMAGE;
   if(mimeType.startsWith('audio/'))return ROUTE_AUDIO;
+  if(['bin','pt','pth','safetensors','gguf','ggml','ckpt','pkl'].includes(ext))return ROUTE_WEIGHTS;
   if(['json','jsonl'].includes(ext)||mimeType==='application/json')return ROUTE_JSON;
   const textExts=['txt','md','markdown','js','ts','jsx','tsx','py','rs','c','cpp','h','hpp','java','go','rb','php','sh','bash','zsh','css','scss','less','html','htm','xml','svg','yaml','yml','toml','ini','cfg','conf','log','csv','tsv','sql'];
   if(textExts.includes(ext)||mimeType.startsWith('text/'))return ROUTE_TEXT;
   return ROUTE_BINARY;
-}
-
-function canFingerprint(route){
-  return route===ROUTE_TEXT||route===ROUTE_JSON;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -419,6 +643,14 @@ function mkChunks(text){const cs=[];let s=0;while(s<text.length&&cs.length<MAX_C
 function fmtSz(b){if(b<1024)return b+' B';if(b<1<<20)return(b/1024).toFixed(1)+' KB';return(b/(1<<20)).toFixed(2)+' MB';}
 function uid(){return Date.now().toString(36)+Math.random().toString(36).slice(2,6);}
 
+/* Safe binary → base64 in 64KB chunks (avoids stack overflow on large files) */
+function bytesToBase64(bytes){
+  const chunk=65536;let s='';
+  for(let i=0;i<bytes.length;i+=chunk)
+    s+=String.fromCharCode.apply(null,bytes.subarray(i,Math.min(i+chunk,bytes.length)));
+  return btoa(s);
+}
+
 const A={
   files:[],sheaf:new SheafMemory(VOCAB),
   totalSize:0,totalChunks:0,
@@ -426,71 +658,128 @@ const A={
   sealedAt:null,parity:null
 };
 
-/* OOMB-style chunked ingest §1.4
-   Each chunk is fingerprinted, packed to ternary, Float32 discarded.
-   Yields to event loop between chunks — never holds full fp[] simultaneously. */
-async function ingest(file){
-  const route=detectRoute(file.name, file.type||'');
-  const fid=uid();
-  const ts=new Date().toISOString();
-
-  if(!canFingerprint(route)){
-    // Passthrough: store raw content as base64 for binary, plain text for others
-    let stored='';
-    if(route===ROUTE_IMAGE||route===ROUTE_AUDIO||route===ROUTE_BINARY){
-      const buf=await file.arrayBuffer();
-      const bytes=new Uint8Array(buf);
-      let s='';for(let i=0;i<bytes.length;i++)s+=String.fromCharCode(bytes[i]);
-      stored=btoa(s);
-    }else{
-      stored=await file.text();
-    }
-    A.files.push({id:fid,filename:file.name,size:file.size,
-      type:file.type||'application/octet-stream',ts,route,
-      passthrough:true,stored,
-      chunks:[],packedFps:[],fullText:''});
-    A.totalSize+=file.size;
-    A.passthroughCount++;
-    refresh();return;
-  }
-
-  // Text route: OOMB chunked fingerprinting
-  const text=await file.text();
-  const chunks=mkChunks(text);
-  const packedFps=[];
-
-  for(let i=0;i<chunks.length;i++){
-    const fp=computeFP(chunks[i]);       // Float32[128]
-    const packed=ternaryPack(fp);         // Uint8[32] — Float32 discarded
-    packedFps.push(Array.from(packed));   // store as plain array for JSON
-    // Add to sheaf using unpacked fp for retrieval
-    const unpacked=ternaryUnpack(packed);
-    A.sheaf.add('text',unpacked,{fid,ci:i,fn:file.name});
-    if(i%4===0)await new Promise(r=>setTimeout(r,0)); // yield §OOMB
-  }
-
-  A.files.push({id:fid,filename:file.name,size:file.size,
-    type:file.type||'text/plain',ts,route,
-    passthrough:false,stored:'',
-    chunks,packedFps,fullText:text});
-  A.totalSize+=file.size;
-  A.totalChunks+=chunks.length;
-  A.routedCount++;
-  A.sealedAt=null;A.parity=null;
-  refresh();
+/* ═══════════════════════════════════════════════════════════
+   Ingest — OOMB-style per-route dispatcher  §1.4
+   ═══════════════════════════════════════════════════════════ */
+let ingesting=false;
+async function handleFiles(files){
+  if(ingesting)return;ingesting=true;
+  const arr=Array.from(files).filter(f=>f.size<12*1024*1024);
+  const pg=document.getElementById('pg');
+  for(let i=0;i<arr.length;i++){pg.style.width=((i/arr.length)*100)+'%';await ingest(arr[i]);await new Promise(r=>setTimeout(r,0));}
+  pg.style.width='100%';setTimeout(()=>pg.style.width='0%',700);
+  ingesting=false;
 }
 
+async function ingest(file){
+  const route=detectRoute(file.name,file.type||'');
+  const fid=uid(),ts=new Date().toISOString();
+
+  /* ── Image ─────────────────────────────────────────────── */
+  if(route===ROUTE_IMAGE){
+    const imgData=await fingerprintImage(file);
+    if(!imgData)return ingestPassthrough(file,fid,route,ts);
+    const{packed,thumbnail,gridW,gridH,W,H}=imgData;
+    const buf=await file.arrayBuffer();
+    const stored=bytesToBase64(new Uint8Array(buf));
+    A.sheaf.add('image',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
+    A.files.push({
+      id:fid,filename:file.name,size:file.size,type:file.type||'image/unknown',
+      ts,route,passthrough:false,stored,fullText:'',
+      chunks:[`[image: ${W}×${H} · ${gridW*gridH} patches · ElasticTok spatial]`],
+      packedFps:[Array.from(packed)],
+      thumbnail,imageW:W,imageH:H,gridW,gridH
+    });
+    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Audio ─────────────────────────────────────────────── */
+  if(route===ROUTE_AUDIO){
+    const audData=await fingerprintAudio(file);
+    if(!audData)return ingestPassthrough(file,fid,route,ts);
+    const{packed,duration,sampleRate,totalSpikes}=audData;
+    const buf=await file.arrayBuffer();
+    const stored=bytesToBase64(new Uint8Array(buf));
+    A.sheaf.add('audio',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
+    A.files.push({
+      id:fid,filename:file.name,size:file.size,type:file.type||'audio/unknown',
+      ts,route,passthrough:false,stored,fullText:'',
+      chunks:[`[audio: ${duration.toFixed(2)}s @ ${sampleRate}Hz · ${totalSpikes} spikes · SpikeVox LIF]`],
+      packedFps:[Array.from(packed)],
+      duration,sampleRate,totalSpikes
+    });
+    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Neural weights ─────────────────────────────────────── */
+  if(route===ROUTE_WEIGHTS){
+    const wData=await fingerprintWeights(file);
+    if(!wData)return ingestPassthrough(file,fid,route,ts);
+    const{packed,numParams,ternaryBytes,float32Bytes,ratio}=wData;
+    const buf=await file.arrayBuffer();
+    const stored=bytesToBase64(new Uint8Array(buf));
+    A.sheaf.add('weights',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
+    A.files.push({
+      id:fid,filename:file.name,size:file.size,type:file.type||'application/octet-stream',
+      ts,route,passthrough:false,stored,fullText:'',
+      chunks:[`[weights: ${numParams.toLocaleString()} params · b1.58 ${ratio} · ${fmtSz(ternaryBytes)} ternary / ${fmtSz(float32Bytes)} fp32]`],
+      packedFps:[Array.from(packed)],
+      numParams,ternaryBytes,float32Bytes,compressionRatio:ratio
+    });
+    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Text / JSON — OOMB chunked fingerprinting ──────────── */
+  if(route===ROUTE_TEXT||route===ROUTE_JSON){
+    const text=await file.text();
+    const chunks=mkChunks(text);const packedFps=[];
+    for(let i=0;i<chunks.length;i++){
+      const fp=computeFP(chunks[i]);
+      const packed=ternaryPack(fp);
+      packedFps.push(Array.from(packed));
+      A.sheaf.add('text',ternaryUnpack(packed),{fid,ci:i,fn:file.name});
+      if(i%4===0)await new Promise(r=>setTimeout(r,0));
+    }
+    A.files.push({
+      id:fid,filename:file.name,size:file.size,type:file.type||'text/plain',
+      ts,route,passthrough:false,stored:'',
+      chunks,packedFps,fullText:text
+    });
+    A.totalSize+=file.size;A.totalChunks+=chunks.length;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Passthrough (truly unstructured binary) ──────────────── */
+  await ingestPassthrough(file,fid,route,ts);
+}
+
+async function ingestPassthrough(file,fid,route,ts){
+  const buf=await file.arrayBuffer();
+  const stored=bytesToBase64(new Uint8Array(buf));
+  A.files.push({
+    id:fid,filename:file.name,size:file.size,
+    type:file.type||'application/octet-stream',ts,route,
+    passthrough:true,stored,fullText:'',chunks:[],packedFps:[]
+  });
+  A.totalSize+=file.size;A.passthroughCount++;refresh();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Extract / Delete
+   ═══════════════════════════════════════════════════════════ */
 function extractFile(id){
   const f=A.files.find(x=>x.id===id);if(!f)return;
-  if(f.passthrough&&(f.route===ROUTE_IMAGE||f.route===ROUTE_AUDIO||f.route===ROUTE_BINARY)){
-    // Decode base64 back to binary
-    const bin=atob(f.stored);
-    const bytes=new Uint8Array(bin.length);
+  // image/audio/weights: stored is base64; text: fullText
+  if(f.stored){
+    const bin=atob(f.stored);const bytes=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
     const blob=new Blob([bytes],{type:f.type});
     const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-  }else{
+  }else if(f.fullText){
     dl(f.fullText,f.filename,f.type);
   }
 }
@@ -501,11 +790,13 @@ function deleteFile(id){
   A.totalSize-=f.size;A.totalChunks-=f.chunks.length;
   if(f.passthrough)A.passthroughCount--;else A.routedCount--;
   A.files.splice(idx,1);
+  // Rebuild sheaf — use route as label so cross-modal distances are preserved
   A.sheaf=new SheafMemory(VOCAB);
   for(const ff of A.files.filter(f=>!f.passthrough)){
+    const lbl=ff.route==='json'?'text':ff.route;
     for(let i=0;i<ff.packedFps.length;i++){
       const unpacked=ternaryUnpack(new Uint8Array(ff.packedFps[i]));
-      A.sheaf.add('text',unpacked,{fid:ff.id,ci:i,fn:ff.filename});
+      A.sheaf.add(lbl,unpacked,{fid:ff.id,ci:i,fn:ff.filename});
     }
   }
   A.sealedAt=null;A.parity=null;
@@ -520,32 +811,35 @@ function djb2(s){let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h)+s.charCodeAt
 async function deriveKey(pw,salt){const enc=new TextEncoder(),km=await crypto.subtle.importKey('raw',enc.encode(pw),'PBKDF2',false,['deriveKey']);return crypto.subtle.deriveKey({name:'PBKDF2',salt,iterations:120000,hash:'SHA-256'},km,{name:'AES-GCM',length:256},false,['encrypt','decrypt']);}
 
 /* ═══════════════════════════════════════════════════════════
-   Payload / .cns  §4 contents field
+   Payload / .cns  §4
    ═══════════════════════════════════════════════════════════ */
 function buildContents(){
   const counts={};
-  for(const f of A.files){counts[f.route]=(counts[f.route]||0)+1;}
+  for(const f of A.files)counts[f.route]=(counts[f.route]||0)+1;
   return counts;
 }
 
 function buildPayload(name){
   const p={
     cns_header:{
-      version:'0.4',created:new Date().toISOString(),sealed:new Date().toISOString(),
-      name:name||'archive',generator:'ConsciousNode SoftWorks · FPSS v0.4',
-      stack:'ROSA/SheafMemory/BitNet-b1.58/OOMB',
-      fps_encoding:'ternary-b1.58',   // §1.3
+      version:'0.5',created:new Date().toISOString(),sealed:new Date().toISOString(),
+      name:name||'archive',generator:'ConsciousNode SoftWorks · FPSS v0.5',
+      stack:'ROSA/SheafMemory/BitNet-b1.58/OOMB/ElasticTok/SpikeVox',
+      fps_encoding:'ternary-b1.58',
       entry_count:A.files.length,total_chunks:A.totalChunks,
-      contents:buildContents(),        // §4
-      keyed:false
+      contents:buildContents(),keyed:false
     },
     entries:A.files.map(f=>({
       id:f.id,filename:f.filename,size:f.size,type:f.type,ts:f.ts,
       route:f.route,passthrough:f.passthrough,
-      stored:f.stored,         // passthrough content
-      fullText:f.fullText,     // text content for round-trip
-      chunks:f.chunks,
-      packedFps:f.packedFps    // ternary-packed fingerprints
+      stored:f.stored,fullText:f.fullText,
+      chunks:f.chunks,packedFps:f.packedFps,
+      // v0.5 extended fields
+      thumbnail:f.thumbnail||null,
+      imageW:f.imageW||0,imageH:f.imageH||0,gridW:f.gridW||0,gridH:f.gridH||0,
+      duration:f.duration||0,sampleRate:f.sampleRate||0,totalSpikes:f.totalSpikes||0,
+      numParams:f.numParams||0,ternaryBytes:f.ternaryBytes||0,
+      float32Bytes:f.float32Bytes||0,compressionRatio:f.compressionRatio||'—'
     })),
     sheaf_state:A.sheaf.export()
   };
@@ -561,24 +855,39 @@ function restorePayload(data){
     id:e.id,filename:e.filename,size:e.size,type:e.type,ts:e.ts,
     route:e.route||ROUTE_TEXT,passthrough:!!e.passthrough,
     stored:e.stored||'',fullText:e.fullText||'',
-    chunks:e.chunks||[],packedFps:e.packedFps||[]
+    chunks:e.chunks||[],packedFps:e.packedFps||[],
+    thumbnail:e.thumbnail||null,
+    imageW:e.imageW||0,imageH:e.imageH||0,gridW:e.gridW||0,gridH:e.gridH||0,
+    duration:e.duration||0,sampleRate:e.sampleRate||0,totalSpikes:e.totalSpikes||0,
+    numParams:e.numParams||0,ternaryBytes:e.ternaryBytes||0,
+    float32Bytes:e.float32Bytes||0,compressionRatio:e.compressionRatio||'—'
   }));
   A.sheaf=new SheafMemory(VOCAB);
-  if(data.sheaf_state)A.sheaf.import(data.sheaf_state);
+  if(data.sheaf_state){
+    A.sheaf.import(data.sheaf_state);
+  }else{
+    for(const ff of A.files.filter(f=>!f.passthrough)){
+      const lbl=ff.route==='json'?'text':ff.route;
+      for(let i=0;i<ff.packedFps.length;i++){
+        const unpacked=ternaryUnpack(new Uint8Array(ff.packedFps[i]));
+        A.sheaf.add(lbl,unpacked,{fid:ff.id,ci:i,fn:ff.filename});
+      }
+    }
+  }
   A.totalSize=A.files.reduce((s,f)=>s+f.size,0);
   A.totalChunks=A.files.reduce((s,f)=>s+f.chunks.length,0);
   A.routedCount=A.files.filter(f=>!f.passthrough).length;
   A.passthroughCount=A.files.filter(f=>f.passthrough).length;
-  A.sealedAt=data.cns_header.sealed||null;
-  A.parity=ok?'ok':'fail';
-  selId=null;
-  document.getElementById('dh').style.display='none';
+  A.sealedAt=data.cns_header.sealed||null;A.parity=ok?'ok':'fail';
+  selId=null;document.getElementById('dh').style.display='none';
   refresh();
   if(!ok)alert('⚠ Parity check failed — archive may be corrupted.');
 }
 
 /* ═══════════════════════════════════════════════════════════
-   Seed reader template  (fully featured, embedded in .cns)
+   Seed reader template — .cns self-drawing window
+   Fully featured: query, browse (thumbnails), contradictions,
+   sheaf, routing. Zero dependencies. Opens in any browser.
    ═══════════════════════════════════════════════════════════ */
 function buildSeedReader(payload,name){
   const dataJson=JSON.stringify(payload).replace(/<\/script>/g,'<\\/script>');
@@ -592,7 +901,7 @@ function buildSeedReader(payload,name){
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;}
 html,body{height:100%;background:#050405;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:13px;color:#e4dff0;overflow:hidden;display:flex;align-items:center;justify-content:center;}
-#win{width:min(820px,99vw);height:min(600px,98vh);background:#0b0a0f;border:1px solid #3a3560;border-radius:11px;display:flex;flex-direction:column;box-shadow:0 40px 100px rgba(0,0,0,.9),0 0 0 1px rgba(200,155,74,.07);}
+#win{width:min(860px,99vw);height:min(620px,98vh);background:#0b0a0f;border:1px solid #3a3560;border-radius:11px;display:flex;flex-direction:column;box-shadow:0 40px 100px rgba(0,0,0,.9),0 0 0 1px rgba(200,155,74,.07);}
 #tb{display:flex;align-items:center;padding:9px 14px;background:#0f0e18;border-bottom:1px solid #2a2640;border-radius:11px 11px 0 0;flex-shrink:0;gap:8px;user-select:none;}
 .tl{width:12px;height:12px;border-radius:50%;}
 .tl-r{background:#f87171;opacity:.7;}.tl-y{background:#fbbf24;opacity:.7;}.tl-g{background:#86efac;opacity:.7;}
@@ -616,8 +925,16 @@ input.qi:focus{border-color:#4ab8c8;}input.qi::placeholder{color:#7a7498;}
 .r-file{font-size:10px;font-weight:700;color:#4ab8c8;}
 .r-score{margin-left:auto;font-size:9px;color:#c89b4a;background:rgba(200,155,74,.08);border:1px solid #7a5e28;padding:2px 6px;border-radius:7px;}
 .r-text{font-size:11px;color:#e4dff0;line-height:1.65;}
+.r-thumb{max-width:100%;max-height:80px;object-fit:contain;border-radius:4px;border:1px solid #2a2640;margin-top:5px;display:block;}
+.rb{font-size:8px;padding:1px 5px;border-radius:4px;border:1px solid;}
+.rb-text{color:#86efac;border-color:#2a5a3a;background:rgba(134,239,172,.06);}
+.rb-json{color:#4ab8c8;border-color:#2a6e7a;background:rgba(74,184,200,.06);}
+.rb-image{color:#fbbf24;border-color:#6a5020;background:rgba(251,191,36,.06);}
+.rb-audio{color:#fbbf24;border-color:#6a5020;background:rgba(251,191,36,.06);}
+.rb-weights{color:#a78bfa;border-color:#4a3a7a;background:rgba(167,139,250,.06);}
+.rb-binary{color:#7a7498;border-color:#3a3560;background:transparent;}
 .bwrap{display:flex;flex:1;overflow:hidden;}
-.blist{width:190px;flex-shrink:0;border-right:1px solid #2a2640;overflow-y:auto;}
+.blist{width:200px;flex-shrink:0;border-right:1px solid #2a2640;overflow-y:auto;}
 .blist::-webkit-scrollbar{width:4px;}.blist::-webkit-scrollbar-thumb{background:#2a2640;border-radius:4px;}
 .bi{padding:9px 11px;border-bottom:1px solid #2a2640;cursor:pointer;transition:background .15s;}
 .bi:hover,.bi.sel{background:#131120;}.bi.sel .bn{color:#c89b4a;}
@@ -630,6 +947,9 @@ input.qi:focus{border-color:#4ab8c8;}input.qi::placeholder{color:#7a7498;}
 .ds::-webkit-scrollbar{width:4px;}.ds::-webkit-scrollbar-thumb{background:#2a2640;border-radius:4px;}
 .cc{background:#1a1829;border:1px solid #2a2640;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:11px;line-height:1.7;color:#e4dff0;white-space:pre-wrap;word-break:break-word;}
 .cn{font-size:9px;color:#7a7498;margin-bottom:3px;}
+.mc{background:#1a1829;border:1px solid #2a2640;border-radius:6px;padding:12px 14px;font-size:11px;line-height:1.8;color:#e4dff0;}
+.mc img{display:block;max-width:100%;border-radius:4px;margin-bottom:9px;border:1px solid #2a2640;}
+.mc-stat{font-size:10px;color:#7a7498;}.mc-stat span{color:#c89b4a;}
 .pt-note{background:rgba(251,191,36,.06);border:1px solid #6a5020;border-radius:6px;padding:11px 13px;font-size:11px;color:#fbbf24;line-height:1.6;}
 .contra-card{background:#131120;border:1px solid #4a2828;border-radius:6px;padding:9px 11px;margin-bottom:7px;}
 .cn-norm{font-size:10px;color:#f87171;margin-bottom:4px;}
@@ -642,9 +962,11 @@ canvas{display:block;width:100%;max-width:340px;margin:0 auto;}
 .route-tbl{width:100%;border-collapse:collapse;font-size:10px;margin-top:6px;}
 .route-tbl th{font-size:8px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;padding:5px 8px;border-bottom:1px solid #2a2640;text-align:left;}
 .route-tbl td{padding:6px 8px;border-bottom:1px solid #2a2640;}
-.rt-active{color:#86efac;}.rt-pending{color:#fbbf24;}.rt-pass{color:#7a7498;}
-#sbar{display:flex;align-items:center;gap:12px;padding:7px 14px;background:#0f0e18;border-top:1px solid #2a2640;border-radius:0 0 11px 11px;font-size:9px;color:#7a7498;flex-shrink:0;}
+.route-tbl tr:last-child td{border-bottom:none;}
+.rt-active{color:#86efac;}.rt-pass{color:#7a7498;}
+#sbar{display:flex;align-items:center;gap:12px;padding:7px 14px;background:#0f0e18;border-top:1px solid #2a2640;border-radius:0 0 11px 11px;font-size:9px;color:#7a7498;flex-shrink:0;flex-wrap:wrap;}
 .sv{color:#c89b4a;}.sv-ok{color:#86efac;}.sv-err{color:#f87171;}
+.empty{text-align:center;color:#7a7498;padding:36px 0;font-size:12px;line-height:1.8;}
 #ls{position:absolute;inset:0;background:rgba(5,4,5,.95);display:flex;align-items:center;justify-content:center;border-radius:11px;z-index:10;}
 #lb{background:#0b0a0f;border:1px solid #3a3560;border-radius:10px;padding:26px;width:300px;text-align:center;}
 .lt{color:#c89b4a;font-size:13px;font-weight:700;margin-bottom:7px;}
@@ -652,11 +974,10 @@ canvas{display:block;width:100%;max-width:340px;margin:0 auto;}
 input.li{width:100%;background:#131120;border:1px solid #2a2640;border-radius:6px;padding:9px 12px;font-size:13px;color:#e4dff0;font-family:inherit;outline:none;margin-bottom:9px;text-align:center;}
 input.li:focus{border-color:#c89b4a;}
 .le{color:#f87171;font-size:10px;margin-top:4px;display:none;}
-.empty{text-align:center;color:#7a7498;padding:36px 0;font-size:12px;line-height:1.8;}
 </style>
 </head>
 <body>
-<div id="win">
+<div id="win" style="position:relative">
   <div id="tb"><div class="tl tl-r"></div><div class="tl tl-y"></div><div class="tl tl-g"></div><div id="wt">loading…</div></div>
   <div class="tabs">
     <div class="tab on" onclick="st('q')">Query</div>
@@ -694,8 +1015,9 @@ input.li:focus{border-color:#c89b4a;}
       <table class="route-tbl" style="margin-top:12px;">
         <tr><th>Type</th><th>Route</th><th>Status</th></tr>
         <tr><td>text · code</td><td>ROSA + ternary-b1.58</td><td class="rt-active">✓ active</td></tr>
-        <tr><td>image/*</td><td>ElasticTok delta-patch</td><td class="rt-pending">⊙ v1</td></tr>
-        <tr><td>audio/*</td><td>SpikeVox → .pop2</td><td class="rt-pending">⊙ v1</td></tr>
+        <tr><td>image/*</td><td>ElasticTok spatial</td><td class="rt-active">✓ active v0.5</td></tr>
+        <tr><td>audio/*</td><td>SpikeVox LIF</td><td class="rt-active">✓ active v0.5</td></tr>
+        <tr><td>neural weights</td><td>BitNet b1.58 ternary</td><td class="rt-active">✓ active v0.5</td></tr>
         <tr><td>binary</td><td>Passthrough</td><td class="rt-pass">→ passthrough</td></tr>
       </table>
     </div>
@@ -762,28 +1084,43 @@ function sq(){
   const qfp=computeFP(text);
   const hits=[];
   for(const f of D._files.filter(f=>!f.passthrough)){
-    for(let i=0;i<f.chunks.length;i++){
+    for(let i=0;i<f.packedFps.length;i++){
       const cfp=ternaryUnpack(f.packedFps[i]);
-      hits.push({fn:f.filename,fid:f.id,chunk:f.chunks[i],score:dot(qfp,cfp)});
+      hits.push({fn:f.filename,fid:f.id,route:f.route||'text',chunk:f.chunks[i]||'',
+        score:dot(qfp,cfp),thumbnail:f.thumbnail||null});
     }
   }
   hits.sort((a,b)=>b.score-a.score);
   const top=hits.slice(0,10).filter(h=>h.score>0.01);
   const passFiles=D._files.filter(f=>f.passthrough);
   if(!top.length&&!passFiles.length){el.innerHTML='<div class="empty">No results found.</div>';return;}
-  el.innerHTML=top.map(h=>'<div class="r-card"><div class="r-head"><span class="r-file">'+esc(h.fn)+'</span>'
-    +'<button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extr(\''+h.fid+'\')">↓ extract</button>'
-    +'<span class="r-score">'+h.score.toFixed(3)+'</span></div><div class="r-text">'+esc(h.chunk)+'</div></div>').join('')
-    +(passFiles.length?'<div style="font-size:10px;color:#7a7498;margin-top:10px;padding:8px 0;border-top:1px solid #2a2640">'+passFiles.length+' passthrough file(s) not searched — extract directly from Browse tab.</div>':'');
+  el.innerHTML=top.map(h=>{
+    const rb='<span class="rb rb-'+esc(h.route)+'">'+esc(h.route)+'</span>';
+    const thumb=h.thumbnail?'<img src="'+h.thumbnail+'" class="r-thumb">':'';
+    const chunkHtml=h.route==='image'?thumb+'<div class="r-text" style="font-size:10px;opacity:.6">'+esc(h.chunk)+'</div>':
+      '<div class="r-text">'+esc(h.chunk)+'</div>';
+    return'<div class="r-card"><div class="r-head">'+rb+'<span class="r-file">'+esc(h.fn)+'</span>'
+      +'<button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extr(\''+h.fid+'\')">↓ extract</button>'
+      +'<span class="r-score">'+h.score.toFixed(3)+'</span></div>'+chunkHtml+'</div>';
+  }).join('')
+  +(passFiles.length?'<div style="font-size:10px;color:#7a7498;margin-top:10px;padding:8px 0;border-top:1px solid #2a2640">'+passFiles.length+' passthrough file(s) — extract from Browse tab.</div>':'');
 }
 
 function renderBlist(){
   if(!D)return;
   const el=document.getElementById('blist');
   if(!D._files.length){el.innerHTML='<div class="empty">No files.</div>';return;}
-  el.innerHTML=D._files.map(f=>'<div class="bi'+(f.id===selFid?' sel':'')+'" onclick="selFile(\''+f.id+'\')">'
-    +'<div class="bn">'+esc(f.filename)+'</div>'
-    +'<div class="bm">'+(f.passthrough?'passthrough':f.chunks.length+' chunks')+'</div></div>').join('');
+  el.innerHTML=D._files.map(f=>{
+    const route=f.route||'text';
+    const meta=f.passthrough?'passthrough':
+      route==='image'?f.imageW+'×'+f.imageH:
+      route==='audio'?(f.duration||0).toFixed(1)+'s':
+      route==='weights'?(f.numParams||0).toLocaleString()+'p':
+      (f.chunks||[]).length+' chunks';
+    return'<div class="bi'+(f.id===selFid?' sel':'')+'" onclick="selFile(\''+f.id+'\')">'
+      +'<div class="bn">'+esc(f.filename)+'</div>'
+      +'<div class="bm">'+esc(meta)+'</div></div>';
+  }).join('');
 }
 
 function selFile(id){
@@ -792,41 +1129,65 @@ function selFile(id){
   document.getElementById('dh').style.display='flex';
   document.getElementById('dname').textContent=f.filename;
   const el=document.getElementById('ds');
+  const route=f.route||'text';
   if(f.passthrough){
-    el.innerHTML='<div class="pt-note">⊙ Passthrough file<br>Route: <strong>'+esc(f.route)+'</strong><br>Stored at 1:1 ratio. '+(f.route==='image'?'ElasticTok pathway pending v1.':f.route==='audio'?'SpikeVox pathway pending v1.':'Stored as-is.')+'<br>Use Extract to download the original file.</div>';
+    el.innerHTML='<div class="pt-note">⊙ Passthrough · route: <strong>'+esc(route)+'</strong><br>Stored at 1:1 ratio. Use Extract to download.</div>';
+  }else if(route==='image'&&f.thumbnail){
+    el.innerHTML='<div class="mc"><img src="'+f.thumbnail+'" alt="'+esc(f.filename)+'">'
+      +'<div class="mc-stat">dimensions: <span>'+f.imageW+'×'+f.imageH+'</span></div>'
+      +'<div class="mc-stat">patches: <span>'+(f.gridW*f.gridH)+'</span> ('+f.gridW+'×'+f.gridH+' grid)</div>'
+      +'<div class="mc-stat">route: <span>ElasticTok spatial → ternary-b1.58</span></div>'
+      +'<div class="mc-stat" style="margin-top:5px;font-size:9px;opacity:.6">'+esc(f.chunks[0]||'')+'</div></div>';
+  }else if(route==='audio'){
+    el.innerHTML='<div class="mc">'
+      +'<div class="mc-stat" style="font-size:18px;font-weight:800;color:#c89b4a;margin-bottom:8px;">'+(f.duration||0).toFixed(2)+'s</div>'
+      +'<div class="mc-stat">sample rate: <span>'+(f.sampleRate||0)+' Hz</span></div>'
+      +'<div class="mc-stat">total spikes: <span>'+(f.totalSpikes||0).toLocaleString()+'</span></div>'
+      +'<div class="mc-stat">route: <span>SpikeVox LIF → ternary-b1.58</span></div>'
+      +'<div class="mc-stat" style="margin-top:5px;font-size:9px;opacity:.6">'+esc(f.chunks[0]||'')+'</div></div>';
+  }else if(route==='weights'){
+    el.innerHTML='<div class="mc">'
+      +'<div class="mc-stat" style="font-size:18px;font-weight:800;color:#a78bfa;margin-bottom:8px;">'+(f.compressionRatio||'—')+'</div>'
+      +'<div class="mc-stat">parameters: <span>'+(f.numParams||0).toLocaleString()+'</span></div>'
+      +'<div class="mc-stat">fp32 size: <span>'+fmtSz(f.float32Bytes||0)+'</span></div>'
+      +'<div class="mc-stat">ternary size: <span>'+fmtSz(f.ternaryBytes||0)+'</span></div>'
+      +'<div class="mc-stat">route: <span>BitNet b1.58 ternary</span></div>'
+      +'<div class="mc-stat" style="margin-top:5px;font-size:9px;opacity:.6">'+esc(f.chunks[0]||'')+'</div></div>';
   }else{
-    el.innerHTML=f.chunks.map((c,i)=>'<div class="cc"><div class="cn">chunk '+(i+1)+'/'+f.chunks.length+'</div>'+esc(c)+'</div>').join('');
+    el.innerHTML=(f.chunks||[]).map((c,i)=>'<div class="cc"><div class="cn">chunk '+(i+1)+'/'+(f.chunks||[]).length+'</div>'+esc(c)+'</div>').join('');
   }
 }
+
+function fmtSz(b){if(b<1024)return b+' B';if(b<1<<20)return(b/1024).toFixed(1)+' KB';return(b/(1<<20)).toFixed(2)+' MB';}
 
 function extr(id){
   if(!D||!id)return;
   const f=D._files.find(x=>x.id===id);if(!f)return;
-  if(f.passthrough){
-    if(f.route==='image'||f.route==='audio'||f.route==='binary'){
-      const bin=atob(f.stored);const bytes=new Uint8Array(bin.length);
-      for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-      const blob=new Blob([bytes],{type:f.type});
-      const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-    }else{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([f.stored],{type:f.type}));a.download=f.filename;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
-  }else{const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([f.fullText],{type:f.type}));a.download=f.filename;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
+  if(f.stored){
+    const bin=atob(f.stored);const bytes=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
+    const blob=new Blob([bytes],{type:f.type});
+    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }else if(f.fullText){
+    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([f.fullText],{type:f.type}));a.download=f.filename;a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }
 }
 
 function renderRouteInfo(){
   if(!D)return;
   const el=document.getElementById('rinfo');
-  const contents=D.cns_header.contents||{};
-  const enc=D.cns_header.fps_encoding||'—';
   const routed=D._files.filter(f=>!f.passthrough);
-  const totalPacked=routed.reduce((s,f)=>s+f.packedFps.length*32,0);
-  const totalRaw=routed.reduce((s,f)=>s+f.packedFps.length*512,0);
+  const totalPacked=routed.reduce((s,f)=>s+(f.packedFps||[]).length*32,0);
+  const totalRaw=routed.reduce((s,f)=>s+(f.packedFps||[]).length*512,0);
   const ratio=totalRaw>0?(totalRaw/totalPacked).toFixed(1)+'×':'—';
+  const byRoute={};for(const f of D._files)byRoute[f.route]=(byRoute[f.route]||0)+1;
   el.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px;">'
-    +'<div style="background:#131120;border:1px solid #2a2640;border-radius:6px;padding:10px 12px;"><div style="font-size:8px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;margin-bottom:4px;">fp encoding</div><div style="font-size:14px;font-weight:800;color:#c89b4a;">'+esc(enc)+'</div></div>'
-    +'<div style="background:#131120;border:1px solid #2a2640;border-radius:6px;padding:10px 12px;"><div style="font-size:8px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;margin-bottom:4px;">index compression</div><div style="font-size:14px;font-weight:800;color:#c89b4a;">'+ratio+'</div><div style="font-size:9px;color:#7a7498;margin-top:2px;">ternary vs Float32</div></div>'
-    +'</div>'
-    +'<div style="font-size:9px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;margin-bottom:6px;">Contents</div>'
-    +Object.entries(contents).map(([k,v])=>'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1e1b2b;font-size:11px;"><span style="color:#e4dff0">'+esc(k)+'</span><span style="color:#c89b4a;font-weight:700;">'+v+' file'+(v>1?'s':'')+'</span></div>').join('');
+    +'<div style="background:#131120;border:1px solid #2a2640;border-radius:6px;padding:10px 12px;"><div style="font-size:8px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;margin-bottom:4px;">fp encoding</div><div style="font-size:13px;font-weight:800;color:#c89b4a;">ternary-b1.58</div></div>'
+    +'<div style="background:#131120;border:1px solid #2a2640;border-radius:6px;padding:10px 12px;"><div style="font-size:8px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;margin-bottom:4px;">index compression</div><div style="font-size:13px;font-weight:800;color:#c89b4a;">'+ratio+'</div><div style="font-size:9px;color:#7a7498;margin-top:2px;">ternary vs Float32</div></div>'
+    +'</div><div style="font-size:9px;color:#7a7498;letter-spacing:.2em;text-transform:uppercase;margin-bottom:6px;">Contents</div>'
+    +Object.entries(byRoute).map(([k,v])=>'<div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #1e1b2b;font-size:11px;"><span style="color:#e4dff0">'+esc(k)+'</span><span style="color:#c89b4a;font-weight:700;">'+v+' file'+(v>1?'s':'')+'</span></div>').join('');
 }
 
 function renderContra(){
@@ -834,7 +1195,8 @@ function renderContra(){
   const el=document.getElementById('rk');
   const routed=D._files.filter(f=>!f.passthrough);
   const allFps=[];
-  for(const f of routed)for(let i=0;i<f.packedFps.length;i++)allFps.push({fn:f.filename,fid:f.id,ci:i,fp:ternaryUnpack(f.packedFps[i]),chunk:f.chunks[i]});
+  for(const f of routed)for(let i=0;i<(f.packedFps||[]).length;i++)
+    allFps.push({fn:f.filename,fid:f.id,ci:i,fp:ternaryUnpack(f.packedFps[i]),chunk:(f.chunks||[])[i]||''});
   if(allFps.length<2){el.innerHTML='<div class="empty">Not enough indexed data.</div>';return;}
   const pairs=[];
   for(let i=0;i<Math.min(allFps.length,80);i++)for(let j=i+1;j<Math.min(allFps.length,80);j++){
@@ -846,7 +1208,10 @@ function renderContra(){
   const top=pairs.slice(0,6);
   if(!top.length){el.innerHTML='<div class="empty">Archive is internally coherent.</div>';return;}
   el.innerHTML='<div style="font-size:9px;color:#7a7498;letter-spacing:.3em;text-transform:uppercase;margin-bottom:10px;">Top divergent pairs</div>'
-    +top.map(p=>'<div class="contra-card"><div class="cn-norm">divergence '+p.div.toFixed(3)+'</div><div class="cn-pair"><div class="cn-chunk"><div class="cn-lbl">'+esc(p.a.fn)+' · chunk '+(p.a.ci+1)+'</div>'+esc(p.a.chunk.slice(0,200))+'…</div><div class="cn-chunk"><div class="cn-lbl">'+esc(p.b.fn)+' · chunk '+(p.b.ci+1)+'</div>'+esc(p.b.chunk.slice(0,200))+'…</div></div></div>').join('');
+    +top.map(p=>'<div class="contra-card"><div class="cn-norm">divergence '+p.div.toFixed(3)+'</div><div class="cn-pair">'
+      +'<div class="cn-chunk"><div class="cn-lbl">'+esc(p.a.fn)+'</div>'+esc(p.a.chunk.slice(0,200))+'</div>'
+      +'<div class="cn-chunk"><div class="cn-lbl">'+esc(p.b.fn)+'</div>'+esc(p.b.chunk.slice(0,200))+'</div>'
+      +'</div></div>').join('');
 }
 
 function renderPoincare(){
@@ -854,7 +1219,17 @@ function renderPoincare(){
   const ctx=canvas.getContext('2d'),W=canvas.width,H=canvas.height,cx=W/2,cy=H/2,R=Math.min(W,H)/2-18;
   ctx.clearRect(0,0,W,H);ctx.fillStyle='#0b0a0f';ctx.fillRect(0,0,W,H);
   [1,.7,.4].forEach(f=>{ctx.beginPath();ctx.arc(cx,cy,R*f,0,Math.PI*2);ctx.strokeStyle='#1e1b2b';ctx.lineWidth=1;ctx.stroke();});
-  if(D._sheaf&&D._sheaf.contexts){const ctxs=D._sheaf.contexts,n=ctxs.length;ctxs.forEach((c,i)=>{const angle=(i/Math.max(n,1))*Math.PI*2,r=c.r*R,x=cx+Math.cos(angle)*r,y=cy+Math.sin(angle)*r;const col=c.r<.4?'#c89b4a':c.r>.7?'#7a7498':'#4ab8c8';ctx.beginPath();ctx.arc(x,y,3.5,0,Math.PI*2);ctx.fillStyle=col;ctx.globalAlpha=.8;ctx.fill();ctx.globalAlpha=1;});const core=ctxs.filter(c=>c.r<.4).length,bnd=ctxs.filter(c=>c.r>=.4&&c.r<=.7).length,edge=ctxs.filter(c=>c.r>.7).length;document.getElementById('pss').innerHTML='contexts: <span style="color:#c89b4a">'+n+'</span><br>core: <span style="color:#c89b4a">'+core+'</span> · boundary: <span style="color:#4ab8c8">'+bnd+'</span> · edge: <span style="color:#7a7498">'+edge+'</span>';}
+  const ss=D.sheaf_state;
+  if(ss&&ss.contexts){
+    const ctxs=ss.contexts,n=ctxs.length;
+    ctxs.forEach((c,i)=>{
+      const angle=(i/Math.max(n,1))*Math.PI*2,r=c.r*R,x=cx+Math.cos(angle)*r,y=cy+Math.sin(angle)*r;
+      const col=c.r<.4?'#c89b4a':c.r>.7?'#7a7498':'#4ab8c8';
+      ctx.beginPath();ctx.arc(x,y,3.5,0,Math.PI*2);ctx.fillStyle=col;ctx.globalAlpha=.8;ctx.fill();ctx.globalAlpha=1;
+    });
+    const core=ctxs.filter(c=>c.r<.4).length,bnd=ctxs.filter(c=>c.r>=.4&&c.r<=.7).length,edge=ctxs.filter(c=>c.r>.7).length;
+    document.getElementById('pss').innerHTML='contexts: <span style="color:#c89b4a">'+n+'</span><br>core: <span style="color:#c89b4a">'+core+'</span> · boundary: <span style="color:#4ab8c8">'+bnd+'</span> · edge: <span style="color:#7a7498">'+edge+'</span>';
+  }
 }
 init();
 <\/script>
@@ -877,7 +1252,7 @@ async function doExp(){
     const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
     const key=await deriveKey(pw,salt);
     const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(json));
-    const wrap={cns_header:{version:'0.4',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.4'},
+    const wrap={cns_header:{version:'0.5',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.5'},
       salt:Array.from(salt),iv:Array.from(iv),payload:Array.from(new Uint8Array(cipher))};
     dl(buildSeedReader(wrap,name),name+'.keyed.cns','text/html');
   }else{
@@ -924,33 +1299,72 @@ function doQ(){
   if(!A.files.length){el.innerHTML='<div class="empty-msg">No files ingested yet.</div>';return;}
   const qfp=computeFP(text);
   const hits=A.sheaf.topK(qfp,10).map(({c,d})=>{
-    const{fid,ci,fn}=c.meta;const f=A.files.find(x=>x.id===fid);if(!f)return null;
-    return{fid,fn,chunk:f.chunks[ci],score:Math.max(0,1-d/4).toFixed(3),pr:c.r.toFixed(3)};
+    const{fid,ci,fn}=c.meta;
+    const f=A.files.find(x=>x.id===fid);if(!f)return null;
+    return{fid,fn,route:f.route,chunk:f.chunks[ci]||'',
+      score:Math.max(0,1-d/4).toFixed(3),pr:c.r.toFixed(3),
+      thumbnail:f.thumbnail||null};
   }).filter(Boolean);
   const passFiles=A.files.filter(f=>f.passthrough);
   if(!hits.length&&!passFiles.length){el.innerHTML='<div class="empty-msg">No results.</div>';return;}
-  el.innerHTML=(hits.length?'<div class="sec-lbl">'+hits.length+' chunks retrieved</div>':'')
-    +hits.map(h=>`<div class="r-card"><div class="r-head"><span class="r-file">${esc(h.fn)}</span><button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extractFile('${h.fid}')">↓ extract</button><span class="r-score">score ${h.score}</span></div><div class="r-text">${esc(h.chunk)}</div><div class="r-pr">Poincaré r = ${h.pr} · ${+h.pr<.4?'core':''+h.pr>.7?'edge':'boundary'}</div></div>`).join('')
-    +(passFiles.length?`<div style="margin-top:10px;font-size:10px;color:var(--muted);padding:8px 0;border-top:1px solid var(--border)">${passFiles.length} passthrough file(s) not searched — use Browse tab to extract.</div>`:'');
+  const routeClass={text:'rb-text',json:'rb-json',image:'rb-image',audio:'rb-audio',weights:'rb-weights',binary:'rb-binary'};
+  el.innerHTML=(hits.length?'<div class="sec-lbl">'+hits.length+' matches retrieved</div>':'')
+    +hits.map(h=>{
+      const rb=`<span class="route-badge ${routeClass[h.route]||'rb-binary'}">${esc(h.route)}</span>`;
+      const thumb=h.thumbnail?`<img src="${h.thumbnail}" class="r-thumb">` :'';
+      const body=h.route==='image'
+        ?`${thumb}<div class="r-text" style="font-size:10px;opacity:.6">${esc(h.chunk)}</div>`
+        :`<div class="r-text">${esc(h.chunk)}</div>`;
+      return`<div class="r-card"><div class="r-head">${rb}<span class="r-file">${esc(h.fn)}</span><button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extractFile('${h.fid}')">↓ extract</button><span class="r-score">score ${h.score}</span></div>${body}<div class="r-pr">Poincaré r = ${h.pr} · ${+h.pr<.4?'core':+h.pr>.7?'edge':'boundary'}</div></div>`;
+    }).join('')
+    +(passFiles.length?`<div style="margin-top:10px;font-size:10px;color:var(--muted);padding:8px 0;border-top:1px solid var(--border)">${passFiles.length} passthrough file(s) not indexed — use Browse tab to extract.</div>`:'');
   refresh();
 }
 
 function renderFlist(){
   const el=document.getElementById('file-list');
   if(!A.files.length){el.innerHTML='<div class="fl-empty">No files ingested yet.</div>';return;}
-  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio'};
-  el.innerHTML=A.files.map(f=>`<div class="fi${f.id===selId?' sel':''}" onclick="selFile('${f.id}')"><div class="fi-info"><div class="fn">${esc(f.filename)}</div><div class="fm">${f.passthrough?'passthrough':f.chunks.length+' chunks'} · ${fmtSz(f.size)}</div></div><span class="route-badge ${routeClass[f.route]||'rb-binary'}">${f.route}</span><button class="icon-btn dl" onclick="event.stopPropagation();extractFile('${f.id}')" title="Extract">↓</button><button class="icon-btn rm" onclick="event.stopPropagation();deleteFile('${f.id}')" title="Remove">✕</button></div>`).join('');
+  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio',weights:'rb-weights'};
+  el.innerHTML=A.files.map(f=>{
+    const meta=f.passthrough?'passthrough':
+      f.route==='image'?`${f.imageW}×${f.imageH}`:
+      f.route==='audio'?`${(f.duration||0).toFixed(1)}s`:
+      f.route==='weights'?`${(f.numParams||0).toLocaleString()}p`:
+      `${f.chunks.length} chunks`;
+    return`<div class="fi${f.id===selId?' sel':''}" onclick="selFile('${f.id}')"><div class="fi-info"><div class="fn">${esc(f.filename)}</div><div class="fm">${esc(meta)} · ${fmtSz(f.size)}</div></div><span class="route-badge ${routeClass[f.route]||'rb-binary'}">${f.route}</span><button class="icon-btn dl" onclick="event.stopPropagation();extractFile('${f.id}')" title="Extract">↓</button><button class="icon-btn rm" onclick="event.stopPropagation();deleteFile('${f.id}')" title="Remove">✕</button></div>`;
+  }).join('');
 }
 
 function selFile(id){
-  selId=id;renderFlist();sw('browse');
+  selId=id;renderFlist();sw('browse');closeSidebar();
   const f=A.files.find(x=>x.id===id);
   if(!f){document.getElementById('dh').style.display='none';return;}
   document.getElementById('dh').style.display='flex';
   document.getElementById('d-name').textContent=f.filename;
   const el=document.getElementById('d-scroll');
   if(f.passthrough){
-    el.innerHTML=`<div class="passthrough-note">⊙ Passthrough file — route: <strong>${esc(f.route)}</strong><br>${f.route==='image'?'ElasticTok pathway pending v1.':f.route==='audio'?'SpikeVox pathway pending v1.':'Stored at 1:1 ratio.'}<br>Use Extract to download the original file.</div>`;
+    el.innerHTML=`<div class="passthrough-note">⊙ Passthrough · route: <strong>${esc(f.route)}</strong><br>Stored at 1:1 ratio. Use Extract to download the original file.</div>`;
+  }else if(f.route==='image'&&f.thumbnail){
+    el.innerHTML=`<div class="media-card"><img src="${f.thumbnail}" alt="${esc(f.filename)}" style="max-width:100%;border-radius:5px;margin-bottom:10px;border:1px solid var(--border);">`
+      +`<div class="media-stat">dimensions: <span>${f.imageW}×${f.imageH}</span></div>`
+      +`<div class="media-stat">patches: <span>${f.gridW*f.gridH}</span> (${f.gridW}×${f.gridH} grid)</div>`
+      +`<div class="media-stat">route: <span>ElasticTok spatial → ternary-b1.58</span></div>`
+      +`<div class="media-stat" style="margin-top:6px;font-size:9px;opacity:.6">${esc(f.chunks[0]||'')}</div></div>`;
+  }else if(f.route==='audio'){
+    el.innerHTML=`<div class="media-card">`
+      +`<div style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--amber);margin-bottom:10px;">${(f.duration||0).toFixed(2)}s</div>`
+      +`<div class="media-stat">sample rate: <span>${f.sampleRate||0} Hz</span></div>`
+      +`<div class="media-stat">total spikes: <span>${(f.totalSpikes||0).toLocaleString()}</span></div>`
+      +`<div class="media-stat">route: <span>SpikeVox LIF → ternary-b1.58</span></div>`
+      +`<div class="media-stat" style="margin-top:6px;font-size:9px;opacity:.6">${esc(f.chunks[0]||'')}</div></div>`;
+  }else if(f.route==='weights'){
+    el.innerHTML=`<div class="media-card">`
+      +`<div style="font-family:var(--mono);font-size:22px;font-weight:800;color:var(--violet);margin-bottom:10px;">${f.compressionRatio||'—'}</div>`
+      +`<div class="media-stat">parameters: <span>${(f.numParams||0).toLocaleString()}</span></div>`
+      +`<div class="media-stat">fp32 size: <span>${fmtSz(f.float32Bytes||0)}</span></div>`
+      +`<div class="media-stat">ternary size: <span>${fmtSz(f.ternaryBytes||0)}</span></div>`
+      +`<div class="media-stat">route: <span>BitNet b1.58 ternary</span></div>`
+      +`<div class="media-stat" style="margin-top:6px;font-size:9px;opacity:.6">${esc(f.chunks[0]||'')}</div></div>`;
   }else{
     el.innerHTML=f.chunks.map((c,i)=>`<div class="chunk-card"><div class="cnum">chunk ${i+1}/${f.chunks.length}</div>${esc(c)}</div>`).join('');
   }
@@ -967,12 +1381,11 @@ function renderContraFPSS(){
       const am=p.a.meta,bm=p.b.meta;
       const af=A.files.find(f=>f.id===am.fid),bf=A.files.find(f=>f.id===bm.fid);
       if(!af||!bf)return'';
-      return`<div class="contra-card"><div class="contra-norm">coboundary ${p.cob.toFixed(4)}</div><div class="contra-pair"><div class="contra-chunk"><div class="contra-lbl">${esc(am.fn)} · chunk ${am.ci+1}</div>${esc(af.chunks[am.ci]?.slice(0,200)+'…')}</div><div class="contra-chunk"><div class="contra-lbl">${esc(bm.fn)} · chunk ${bm.ci+1}</div>${esc(bf.chunks[bm.ci]?.slice(0,200)+'…')}</div></div></div>`;
+      return`<div class="contra-card"><div class="contra-norm">coboundary ${p.cob.toFixed(4)}</div><div class="contra-pair"><div class="contra-chunk"><div class="contra-lbl">${esc(am.fn)} · chunk ${am.ci+1}</div>${esc((af.chunks[am.ci]||'').slice(0,200))}…</div><div class="contra-chunk"><div class="contra-lbl">${esc(bm.fn)} · chunk ${bm.ci+1}</div>${esc((bf.chunks[bm.ci]||'').slice(0,200))}…</div></div></div>`;
     }).join('');
 }
 
 function renderRouting(){
-  // Stats
   const routed=A.files.filter(f=>!f.passthrough);
   const totalPacked=routed.reduce((s,f)=>s+f.packedFps.length*32,0);
   const totalRaw=routed.reduce((s,f)=>s+f.packedFps.length*512,0);
@@ -980,14 +1393,13 @@ function renderRouting(){
   document.getElementById('st-idx').textContent=fmtSz(totalPacked);
   document.getElementById('st-raw').textContent=fmtSz(totalRaw);
   document.getElementById('st-ratio').textContent=totalRaw>0?(totalRaw/totalPacked).toFixed(1)+'×':'—';
-  // Breakdown by route
   const byRoute={};
   for(const f of A.files)byRoute[f.route]=(byRoute[f.route]||[]).concat(f);
   const el=document.getElementById('route-breakdown');
   if(!A.files.length){el.innerHTML='<div style="font-size:11px;color:var(--muted);">No files ingested.</div>';return;}
+  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio',weights:'rb-weights'};
   el.innerHTML=Object.entries(byRoute).map(([route,files])=>{
-    const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio'}[route]||'rb-binary';
-    return`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;"><span class="route-badge ${routeClass}">${route}</span><span style="color:var(--text)">${files.length} file${files.length>1?'s':''}</span><span style="color:var(--muted);margin-left:auto;font-family:var(--mono);font-size:10px;">${files.map(f=>f.filename).join(', ').slice(0,60)}${files.map(f=>f.filename).join(', ').length>60?'…':''}</span></div>`;
+    return`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;"><span class="route-badge ${routeClass[route]||'rb-binary'}">${route}</span><span style="color:var(--text)">${files.length} file${files.length>1?'s':''}</span><span style="color:var(--muted);margin-left:auto;font-family:var(--mono);font-size:10px;">${files.map(f=>f.filename).join(', ').slice(0,60)}${files.map(f=>f.filename).join(', ').length>60?'…':''}</span></div>`;
   }).join('');
 }
 
@@ -997,11 +1409,26 @@ function renderPC(){
   ctx.clearRect(0,0,W,H);ctx.fillStyle='#0b0a0f';ctx.fillRect(0,0,W,H);
   [1,.7,.4].forEach(f=>{ctx.beginPath();ctx.arc(cx,cy,R*f,0,Math.PI*2);ctx.strokeStyle='#1e1b2b';ctx.lineWidth=1;ctx.stroke();});
   const ctxs=A.sheaf.contexts,n=ctxs.length;
-  ctxs.forEach((c,i)=>{const angle=(i/Math.max(n,1))*Math.PI*2,r=c.r*R,x=cx+Math.cos(angle)*r,y=cy+Math.sin(angle)*r;const col=c.r<.4?'#c89b4a':c.r>.7?'#7a7498':'#4ab8c8';ctx.beginPath();ctx.arc(x,y,3.5,0,Math.PI*2);ctx.fillStyle=col;ctx.globalAlpha=.8;ctx.fill();ctx.globalAlpha=1;});
+  // Color by route label
+  const lc={'text':'#c89b4a','json':'#4ab8c8','image':'#fbbf24','audio':'#fbbf24','weights':'#a78bfa','q':'#7a7498'};
+  ctxs.forEach((c,i)=>{
+    const angle=(i/Math.max(n,1))*Math.PI*2,r=c.r*R,x=cx+Math.cos(angle)*r,y=cy+Math.sin(angle)*r;
+    const col=lc[c.l]||(c.r<.4?'#c89b4a':c.r>.7?'#7a7498':'#4ab8c8');
+    ctx.beginPath();ctx.arc(x,y,3.5,0,Math.PI*2);ctx.fillStyle=col;ctx.globalAlpha=.8;ctx.fill();ctx.globalAlpha=1;
+  });
   const core=ctxs.filter(c=>c.r<.4).length,bnd=ctxs.filter(c=>c.r>=.4&&c.r<=.7).length,edge=ctxs.filter(c=>c.r>.7).length;
   document.getElementById('sheaf-stats').innerHTML=`contexts: <span style="color:var(--amber)">${n}</span><br>core: <span style="color:#c89b4a">${core}</span> · boundary: <span style="color:#4ab8c8">${bnd}</span> · edge: <span style="color:#7a7498">${edge}</span><br>H¹(ℱ): <span style="color:var(--amber)">${A.sheaf.lastNorm.toFixed(4)}</span><br>contradictions: <span style="color:var(--${A.sheaf.totalC>0?'err':'ok'})">${A.sheaf.totalC}</span>`;
 }
 
+function toggleSidebar(){
+  const s=document.getElementById('sidebar'),b=document.getElementById('sidebar-backdrop');
+  const open=s.classList.toggle('open');
+  b.classList.toggle('open',open);
+}
+function closeSidebar(){
+  document.getElementById('sidebar').classList.remove('open');
+  document.getElementById('sidebar-backdrop').classList.remove('open');
+}
 function updateSealBadge(){
   const b=document.getElementById('seal-badge');
   if(A.sealedAt&&A.parity==='ok'){b.className='seal-badge seal-ok';b.textContent='✓ sealed '+new Date(A.sealedAt).toLocaleDateString();}
@@ -1025,17 +1452,8 @@ function refresh(){
 }
 
 /* ═══════════════════════════════════════════════════════════
-   I/O
+   Event listeners
    ═══════════════════════════════════════════════════════════ */
-let ingesting=false;
-async function handleFiles(files){
-  if(ingesting)return;ingesting=true;
-  const arr=Array.from(files).filter(f=>f.size<12*1024*1024);
-  const pg=document.getElementById('pg');
-  for(let i=0;i<arr.length;i++){pg.style.width=((i/arr.length)*100)+'%';await ingest(arr[i]);await new Promise(r=>setTimeout(r,0));}
-  pg.style.width='100%';setTimeout(()=>pg.style.width='0%',700);
-  ingesting=false;
-}
 const dz=document.getElementById('dz');
 dz.addEventListener('click',()=>document.getElementById('fi').click());
 dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('over');});
