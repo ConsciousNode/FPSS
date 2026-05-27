@@ -25,7 +25,10 @@ The name is accurate: the archive converges on a stable neural representation of
 | **BitNet b1.58 ternary packing** | Float32[128] fingerprints packed to Uint8[32] — 16x index size reduction. {-1→00, 0→01, 1→10}, 4 values/byte |
 | **Fisher-Rao retrieval** | Uncertainty-aware semantic search. Not cosine similarity |
 | **Poincaré ball decay** | Frequently accessed memories sink to core, stale ones drift to edge. No manual garbage collection |
-| **Type-aware routing** | Text/code → ROSA fingerprint. Images → passthrough + ElasticTok pathway (pending). Audio → passthrough + SpikeVox pathway (pending). Arbitrary binary → clean passthrough, no penalty |
+| **ElasticTok (v0.5)** | Image route: Canvas decode → 16×16 spatial patch grid → RGB means → ROSA → ternary-b1.58. Thumbnail stored for query preview |
+| **SpikeVox LIF (v0.5)** | Audio route: Web Audio decode → PCM → LIF membrane integration → spike rate features → ROSA → ternary-b1.58 |
+| **Neural weights route (v0.5)** | `.bin .pt .pth .safetensors .gguf .ckpt` → Float32 sampling → magnitude quantization → ROSA. Compression ratio computed |
+| **Type-aware routing** | Text/code/JSON → ROSA fingerprint. Images → ElasticTok. Audio → SpikeVox. Neural weights → BitNet b1.58. Arbitrary binary → clean passthrough |
 | **OOMB-style chunked ingest** | Float32 discarded after packing. Yields to event loop between chunks. Constant memory regardless of archive size |
 | **WebCrypto AES-GCM keyed mode** | Lock the SheafMemory index behind a passphrase. Without the key the archive is valid `.cns` structure, unreadable contents. Neural Graffiti compatible |
 | **Self-contained seed reader** | Every `.cns` export embeds its own reader. Send the file to someone with no FPSS installed. They open it in a browser. Full search, browse, extract, contradiction detection — no install, no context required |
@@ -34,11 +37,25 @@ That last one is the thing. The archive is the tool. You export a `.cns` file an
 
 ---
 
-## v0.4 Changelog
+## Changelog
+
+### v0.5 — 2026-05-27
+
+- **ElasticTok image pathway** — `image/*` now fully routed. Canvas decode → 16×16 spatial patch grid → RGB channel means → `computeFPFromToks` → ROSA histogram → ternary-b1.58. Thumbnail (80px JPEG) stored inline, shown in query results and Browse panel
+- **SpikeVox LIF audio pathway** — `audio/*` now fully routed. Web Audio API decode → PCM chunks → Leaky Integrate-and-Fire membrane integration (V_th=3.5, leak=0.95, refractory=2 chunks) → spike rate features → ROSA → ternary-b1.58. Duration + total spike count stored and displayed
+- **Neural weights pathway** — `.bin .pt .pth .safetensors .gguf .ggml .ckpt .pkl` now fully routed. Float32 sampling → magnitude quantization [0–127] → ROSA fingerprint. safetensors 8-byte header offset handled. BitNet b1.58 compression ratio computed and displayed
+- **`computeFPFromToks()` extracted** — shared fingerprint primitive used by all four routes. Text: char codes → toks. Image: RGB patch means → toks. Audio: LIF spike rate → toks. Weights: Float32 magnitudes → toks
+- **Responsive layout** — sidebar becomes a slide-in drawer on mobile (≤639px) with ☰ toggle and backdrop. Tab bar scrolls horizontally. Status bar condenses. `100dvh` fixes mobile browser chrome. Tabs scroll without wrapping
+- **Poincaré ball colored by route** — text=amber, json=teal, image/audio=yellow, weights=violet
+- **`deleteFile()` route-aware** — sheaf rebuild uses correct label per route, not hardcoded `'text'`
+- **`bytesToBase64()` chunked** — 64KB chunks prevent stack overflow on large files
+- All three pending routes now show `✓ active` in the routing table. Binary/unknown is the only true passthrough remaining
+
+### v0.4 — 2026-05-26
 
 - **BitNet b1.58 ternary packing** — fingerprint index reduced 16x. Float32[128] → Uint8[32]. Encoding: `{-1→00, 0→01, 1→10}`, 4 values/byte. `fps_encoding: 'ternary-b1.58'` in header
-- **Type-aware routing** — text/code/structured gets ROSA fingerprinting; images and audio get passthrough with modality-specific pathways noted (pending); arbitrary binary passes through clean with no penalty
-- **`contents` header field** — data type summary `{text:N, json:N, binary:N, image:N, audio:N}` written to every archive header
+- **Type-aware routing** — text/code/structured gets ROSA fingerprinting; images and audio noted as pending pathways; arbitrary binary passes through clean
+- **`contents` header field** — data type summary written to every archive header
 - **OOMB-style chunked ingest** — Float32 discarded after packing, yields to event loop between chunks, constant memory regardless of archive size
 
 ---
@@ -74,8 +91,8 @@ Traditional storage is passive. It holds bytes and returns them unchanged. It do
 
 | Scope | Feature |
 |-------|---------|
-| v0.4 (current) | Ternary packing, type-aware routing, OOMB ingest, keyed mode, seed reader |
-| v1 | ElasticTok full image compression, SpikeVox full audio compression |
+| v0.5 (current) | ElasticTok image route, SpikeVox audio route, neural weights route, responsive UI |
+| v1 | `.pop2` audio synthesis playback, full ElasticTok delta-patch video |
 | v1 | AutopoieticOptimizer self-healing — reconstruct corrupted data from neural context |
 | Caput scope | `.cns` as OS boot volume in [Caput Ex Simulacra](https://github.com/ConsciousNode/Simulacra) |
 
@@ -90,10 +107,11 @@ FPSS is not a new project. It is a new orientation of the existing ConsciousNode
 | ROSA (Simulacra) | Sequence layer — suffix automaton for all ingested data |
 | SheafMemory (Evangelion) | Structural layer — topological index and consistency |
 | BitNet b1.58 (HTMLNLM) | Physical layer — ternary weight storage |
+| ElasticTok (Simulacra) | Vision layer — spatial patch fingerprinting |
+| SpikeVox (Simulacra) | Audio layer — LIF spike encoding |
 | OOMB (HTMLNLM) | Transport layer — constant-memory streaming |
 | RAG-Time | Access layer — semantic query interface |
-| OmniVocal / `.pop2` | Audio compression pathway |
-| ElasticTok | Vision/video compression pathway |
+| OmniVocal / `.pop2` | Audio synthesis pathway (v1) |
 
 ---
 
@@ -107,7 +125,9 @@ FPSS is not a new project. It is a new orientation of the existing ConsciousNode
 ## Credits
 
 **ROSA / SheafMemory:** ConsciousNode/Simulacra (Kehai Interim, Ed Interim, Vael Interim)  
-**FPSS v0.4:** Kham Kizer · Kehai Interim · 2026-05-26
+**SpikeVox v2:** Kehai Interim / Phase 2 (ported from Simulacra)  
+**ElasticTok v2:** Kehai Interim / Phase 3 (spatial variant for static images)  
+**FPSS v0.5:** Kham Kizer · Kehai Interim · 2026-05-27
 
 ---
 
