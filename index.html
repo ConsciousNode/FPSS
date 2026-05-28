@@ -5,8 +5,33 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>FPSS — Fixed Point Storage System</title>
 <!--
-  FPSS — Fixed Point Storage System v0.5
-  ConsciousNode SoftWorks · 2026-05-27
+  FPSS — Fixed Point Storage System v0.7
+  ConsciousNode SoftWorks · 2026-05-28
+
+  v0.7 — WASMKernel acceleration:
+    ROSA-ANS codec now runs in WebAssembly via WASMKernal (ConsciousNode SoftWorks)
+    WAT module compiled once at boot via MicroWAT assembler
+    Hot loops (rANS encode/decode, freq table build) execute as native i32 WASM
+    JS fallback active if kernel boot fails (v0.6 pure-JS path)
+    WASMKernel accessed via direct export calls (bypasses cycle budget)
+    Memory layout: freq table @ 0x10000, src @ 0x18000, dst @ 0x80000
+    Codec exports: ans_encode(src,slen,dst,freq) → clen
+                   ans_decode(src,slen,dst,dlen,freq) → dlen
+                   build_freq(src,slen,freq) → void
+
+  v0.6 — ROSA-ANS real compression (all routes):
+    ROSA-ANS byte-level compression   §1.1
+      Full [0–255] byte range, not just ASCII
+      ROSA suffix automaton → next-byte prediction histogram
+      ANS (rANS) entropy coding on predicted byte probabilities
+      Real compression of ALL routed types (text, json, image, audio, weights)
+      Stored as base64(compressed_bytes) — replaces fullText for text routes
+      compressionRatio shown per-file (original vs compressed bytes)
+      Seed reader includes ANS decoder — lossless round-trip guaranteed
+    Bug fixes:
+      .cns files now download with correct MIME (not text/html → .html)
+      Seed reader RAW extraction regex fixed (non-greedy broke on large archives)
+      Browse tab now populates correctly on all archive sizes
 
   v0.5 — omnimodal fingerprinting (getting close to v1):
     ElasticTok image pathway     §8.1
@@ -54,7 +79,8 @@
     ROSA / SheafMemory: ConsciousNode/Simulacra (Kehai Interim, Ed Interim, Vael Interim)
     SpikeVox v2: Kehai Interim / Phase 2 (ported from Simulacra)
     ElasticTok v2: Kehai Interim / Phase 3 (spatial variant for static images)
-    FPSS v0.5: Kham Kizer · Kehai Interim · 2026-05-27
+    WASMKernal: ConsciousNode SoftWorks (embedded)
+    FPSS v0.7: Kham Kizer · Ed Interim · 2026-05-28
 -->
 <style>
 :root{
@@ -297,8 +323,8 @@ input.mi:focus{border-color:var(--amber);}
           <div class="sec-lbl" style="margin-top:8px;">Routing Table</div>
           <table class="route-table">
             <tr><th>Type</th><th>Route</th><th>Status</th></tr>
-            <tr><td class="rt-type">text · code · log</td><td>ROSA fingerprint + full text</td><td class="rt-active">✓ active</td></tr>
-            <tr><td class="rt-type">JSON · CSV · YAML</td><td>ROSA fingerprint + full text</td><td class="rt-active">✓ active</td></tr>
+            <tr><td class="rt-type">text · code · log</td><td>ROSA-ANS byte compression</td><td class="rt-active">✓ v0.7</td></tr>
+            <tr><td class="rt-type">JSON · CSV · YAML</td><td>ROSA-ANS byte compression</td><td class="rt-active">✓ v0.7</td></tr>
             <tr><td class="rt-type">image/*</td><td>ElasticTok spatial patches → ternary-b1.58</td><td class="rt-active">✓ active v0.5</td></tr>
             <tr><td class="rt-type">audio/*</td><td>SpikeVox LIF → spike features → ternary-b1.58</td><td class="rt-active">✓ active v0.5</td></tr>
             <tr><td class="rt-type">neural weights</td><td>Float32 sampling → BitNet b1.58 ternary</td><td class="rt-active">✓ active v0.5</td></tr>
@@ -359,6 +385,730 @@ input.mi:focus{border-color:var(--amber);}
   </div>
 </div>
 
+<!-- === WASM-KERNEL-EMBED-START === -->
+    <script id="wasm-kernel-core">
+        const EMBED_MODE = (() => {
+            if (window.WASM_KERNEL_EMBED) return 'explicit';
+            if (window.parent !== window) return 'iframe';
+            if (document.currentScript?.dataset?.kernel) return 'script';
+            return 'standalone';
+        })();
+
+        // =====================================================================
+        // 1. PURE JS WAT ASSEMBLER (MicroWAT)
+        // =====================================================================
+        
+        class WATAssembler {
+            constructor() {
+                this.OP = {
+                    unreachable: 0x00, nop: 0x01, block: 0x02, loop: 0x03, if: 0x04, else: 0x05, end: 0x0B, br: 0x0C, br_if: 0x0D, return: 0x0F, call: 0x10, drop: 0x1A,
+                    local_get: 0x20, local_set: 0x21, local_tee: 0x22, global_get: 0x23, global_set: 0x24,
+                    i32_load: 0x28, i32_store: 0x36, i32_store8: 0x3A,
+                    i32_const: 0x41, i32_eqz: 0x45, i32_eq: 0x46, i32_ne: 0x47, i32_lt_s: 0x48, i32_lt_u: 0x49, i32_le_s: 0x4a, i32_le_u: 0x4b, i32_gt_s: 0x4c, i32_gt_u: 0x4d, i32_ge_s: 0x4e, i32_ge_u: 0x4f,
+                    i32_add: 0x6A, i32_sub: 0x6B, i32_mul: 0x6C, i32_div_s: 0x6D, i32_div_u: 0x6E, i32_rem_s: 0x6F, i32_rem_u: 0x70, i32_and: 0x71, i32_or: 0x72, i32_xor: 0x73, i32_shl: 0x74, i32_shr_s: 0x75, i32_shr_u: 0x76
+                };
+                this.VAL_TYPE = { i32: 0x7F, i64: 0x7E, f32: 0x7D, f64: 0x7C };
+            }
+
+            compile(watCode, isUserCode = false) {
+                const tokens = this._tokenize(watCode);
+                const ast = this._parseSExpr(tokens);
+
+                // Auto-link user code to the Inner Sanctum
+                if (isUserCode && ast[0] === 'module') {
+                    for (let i = ast.length - 1; i >= 1; i--) {
+                        if (Array.isArray(ast[i])) {
+                            if (ast[i][0] === 'memory') ast.splice(i, 1);
+                            if (ast[i][0] === 'export' && Array.isArray(ast[i][2]) && ast[i][2][0] === 'memory') ast.splice(i, 1);
+                        }
+                    }
+                    ast.splice(1, 0, ['import', {type:'string', val:'inner'}, {type:'string', val:'mem'}, ['memory', '1']]);
+                    ast.splice(1, 0, ['import', {type:'string', val:'inner'}, {type:'string', val:'cycle_budget'}, ['global', '$cycle_budget', ['mut', 'i32']]]);
+                }
+
+                return this._emitWasm(ast, isUserCode);
+            }
+
+            _tokenize(str) {
+                const tokens = [];
+                let i = 0;
+                while (i < str.length) {
+                    let c = str[i];
+                    if (c === '(' || c === ')') { tokens.push(c); i++; }
+                    else if (/\s/.test(c)) { i++; }
+                    else if (c === ';' && str[i+1] === ';') { while(i < str.length && str[i] !== '\n') i++; }
+                    else if (c === '"') {
+                        let s = ''; i++;
+                        while(i < str.length && str[i] !== '"') {
+                            if (str[i] === '\\' && str[i+1] !== undefined) {
+                                if (str[i+1] === 'n') s += '\n';
+                                else if (str[i+1] === 't') s += '\t';
+                                else if (str[i+1] === '\\') s += '\\';
+                                else if (str[i+1] === '"') s += '"';
+                                else if (/[0-9a-fA-F]/.test(str[i+1]) && /[0-9a-fA-F]/.test(str[i+2])) {
+                                    s += String.fromCharCode(parseInt(str.substring(i+1, i+3), 16));
+                                    i += 2;
+                                } else { s += str[i+1]; }
+                                i++;
+                            } else {
+                                s += str[i];
+                            }
+                            i++;
+                        }
+                        tokens.push({ type: 'string', val: s }); i++;
+                    }
+                    else {
+                        let word = '';
+                        while (i < str.length && !/\s|\(|\)|\;/.test(str[i])) { word += str[i]; i++; }
+                        if (word.length > 0) tokens.push(word);
+                    }
+                }
+                return tokens;
+            }
+
+            _parseSExpr(tokens) {
+                let pos = 0;
+                function parse() {
+                    if (pos >= tokens.length) return null;
+                    let t = tokens[pos++];
+                    if (t === '(') {
+                        let list = [];
+                        while (pos < tokens.length && tokens[pos] !== ')') {
+                            list.push(parse());
+                        }
+                        pos++;
+                        return list;
+                    }
+                    return t;
+                }
+                const ast = [];
+                while (pos < tokens.length) {
+                    let node = parse();
+                    if (node) ast.push(node);
+                }
+                return ast[0];
+            }
+
+            _encodeULEB128(val) {
+                let bytes = [];
+                do {
+                    let byte = val & 0x7f;
+                    val >>= 7;
+                    if (val !== 0) byte |= 0x80;
+                    bytes.push(byte);
+                } while (val !== 0);
+                return bytes;
+            }
+
+            _encodeSLEB128(val) {
+                let bytes = [];
+                let more = true;
+                while (more) {
+                    let byte = val & 0x7f;
+                    val >>= 7;
+                    let signBit = byte & 0x40;
+                    if ((val === 0 && !signBit) || (val === -1 && signBit)) {
+                        more = false;
+                    } else { byte |= 0x80; }
+                    bytes.push(byte);
+                }
+                return bytes;
+            }
+
+            _encodeString(str) {
+                const utf8 = new TextEncoder().encode(str);
+                return [...this._encodeULEB128(utf8.length), ...utf8];
+            }
+
+            _emitWasm(ast, isUserCode) {
+                if (!ast || ast[0] !== 'module') throw new Error("Invalid WAT: root must be module");
+                
+                const sections = { type: [], import: [], func: [], memory: [], global: [], export: [], code: [], data: [] };
+                
+                const types = []; 
+                const funcs = [];
+                const imports = [];
+                const exports = [];
+                const memory = [];
+                const globals = [];
+                const data = [];
+                
+                let funcIdx = 0;
+                let globalIdx = 0;
+                let globalFuncMap = {};
+                let globalIdxMap = {};
+
+                // Pass 1
+                for (let i = 1; i < ast.length; i++) {
+                    let node = ast[i];
+                    if (!Array.isArray(node)) continue;
+                    
+                    if (node[0] === 'import') {
+                        let mod = node[1].val;
+                        let field = node[2].val;
+                        let desc = node[3];
+                        if (desc[0] === 'func') {
+                            let name = desc[1].startsWith('$') ? desc[1] : null;
+                            let params = [], results = [];
+                            for(let j=1; j<desc.length; j++) {
+                                if (Array.isArray(desc[j])) {
+                                    if (desc[j][0] === 'param') params.push(...desc[j].slice(1).map(p => this.VAL_TYPE[p]));
+                                    if (desc[j][0] === 'result') results.push(this.VAL_TYPE[desc[j][1]]);
+                                }
+                            }
+                            let sig = { params, results };
+                            let typeIdx = types.findIndex(t => JSON.stringify(t) === JSON.stringify(sig));
+                            if (typeIdx === -1) { typeIdx = types.length; types.push(sig); }
+                            
+                            imports.push({ mod, field, kind: 0, typeIdx });
+                            if (name) globalFuncMap[name] = funcIdx;
+                            funcIdx++;
+                        } else if (desc[0] === 'memory') {
+                            imports.push({ mod, field, kind: 2, min: parseInt(desc[1]) });
+                        } else if (desc[0] === 'global') {
+                            let name = desc[1];
+                            let mut = desc[2][0] === 'mut' ? 1 : 0;
+                            let type = this.VAL_TYPE[mut ? desc[2][1] : desc[2]];
+                            imports.push({ mod, field, kind: 3, desc: [type, mut] });
+                            if (name) globalIdxMap[name] = globalIdx;
+                            globalIdx++;
+                        }
+                    } else if (node[0] === 'memory') {
+                        memory.push({ min: parseInt(node[1]) });
+                    } else if (node[0] === 'global') {
+                        let name = null, exportName = null;
+                        let typeNode, initNode;
+                        
+                        for(let j=1; j<node.length; j++) {
+                            if (typeof node[j] === 'string' && node[j].startsWith('$')) name = node[j];
+                            else if (Array.isArray(node[j]) && node[j][0] === 'export') exportName = node[j][1].val;
+                            else if (!typeNode) typeNode = node[j];
+                            else if (!initNode) initNode = node[j];
+                        }
+
+                        let mut = 0, type = 0x7F;
+                        if (Array.isArray(typeNode) && typeNode[0] === 'mut') { mut = 1; type = this.VAL_TYPE[typeNode[1]]; }
+                        else if (typeof typeNode === 'string') { type = this.VAL_TYPE[typeNode]; }
+
+                        let initVal = 0;
+                        if (Array.isArray(initNode) && initNode[0] === 'i32.const') initVal = parseInt(initNode[1]);
+
+                        if (name) globalIdxMap[name] = globalIdx;
+                        globals.push({ mut, type, initVal });
+                        if (exportName) exports.push({ name: exportName, kind: 3, index: globalIdx });
+                        globalIdx++;
+                    }
+                }
+
+                // Pass 2
+                for (let i = 1; i < ast.length; i++) {
+                    let node = ast[i];
+                    if (!Array.isArray(node)) continue;
+
+                    if (node[0] === 'func') {
+                        let name = null, exportName = null;
+                        let params = [], results = [], locals = [], body = [];
+                        let localMap = {}; 
+                        let localIdx = 0;
+
+                        for (let j = 1; j < node.length; j++) {
+                            let item = node[j];
+                            if (typeof item === 'string' && item.startsWith('$')) {
+                                name = item;
+                                globalFuncMap[name] = funcIdx;
+                            } else if (Array.isArray(item)) {
+                                if (item[0] === 'export') exportName = item[1].val;
+                                else if (item[0] === 'param') {
+                                    for (let k = 1; k < item.length; k++) {
+                                        if (item[k].startsWith('$')) { localMap[item[k]] = localIdx++; params.push(this.VAL_TYPE[item[++k]]); }
+                                        else { params.push(this.VAL_TYPE[item[k]]); localIdx++; }
+                                    }
+                                } else if (item[0] === 'result') {
+                                    results.push(this.VAL_TYPE[item[1]]);
+                                } else if (item[0] === 'local') {
+                                    for (let k = 1; k < item.length; k++) {
+                                        if (item[k].startsWith('$')) { localMap[item[k]] = localIdx++; locals.push(this.VAL_TYPE[item[++k]]); }
+                                        else { locals.push(this.VAL_TYPE[item[k]]); localIdx++; }
+                                    }
+                                } else { body.push(item); }
+                            } else { body.push(item); }
+                        }
+
+                        let sig = { params, results };
+                        let typeIdx = types.findIndex(t => JSON.stringify(t) === JSON.stringify(sig));
+                        if (typeIdx === -1) { typeIdx = types.length; types.push(sig); }
+
+                        funcs.push({ typeIdx, locals, body, localMap });
+                        if (exportName) exports.push({ name: exportName, kind: 0, index: funcIdx });
+                        funcIdx++;
+                    } else if (node[0] === 'export') {
+                        let name = node[1].val;
+                        let desc = node[2];
+                        if (desc[0] === 'memory') exports.push({ name, kind: 2, index: parseInt(desc[1] || 0) });
+                        if (desc[0] === 'func') {
+                            let fidx = (typeof desc[1] === 'string' && desc[1].startsWith('$')) ? globalFuncMap[desc[1]] : parseInt(desc[1]);
+                            exports.push({ name, kind: 0, index: fidx });
+                        }
+                    } else if (node[0] === 'data') {
+                        let offsetExpr = node[1];
+                        let bytes = new TextEncoder().encode(node[2].val);
+                        data.push({ offset: offsetExpr, bytes });
+                    }
+                }
+
+                const createSection = (id, payload) => payload.length === 0 ? [] : [id, ...this._encodeULEB128(payload.length), ...payload];
+
+                if (types.length > 0) {
+                    let payload = this._encodeULEB128(types.length);
+                    types.forEach(t => {
+                        payload.push(0x60, ...this._encodeULEB128(t.params.length));
+                        t.params.forEach(p => payload.push(p));
+                        payload.push(...this._encodeULEB128(t.results.length));
+                        t.results.forEach(r => payload.push(r));
+                    });
+                    sections.type = createSection(1, payload);
+                }
+
+                if (imports.length > 0) {
+                    let payload = this._encodeULEB128(imports.length);
+                    imports.forEach(imp => {
+                        payload.push(...this._encodeString(imp.mod), ...this._encodeString(imp.field), imp.kind);
+                        if (imp.kind === 0) payload.push(...this._encodeULEB128(imp.typeIdx));
+                        if (imp.kind === 2) payload.push(0x00, ...this._encodeULEB128(imp.min));
+                        if (imp.kind === 3) payload.push(...imp.desc);
+                    });
+                    sections.import = createSection(2, payload);
+                }
+
+                if (funcs.length > 0) {
+                    let payload = this._encodeULEB128(funcs.length);
+                    funcs.forEach(f => payload.push(...this._encodeULEB128(f.typeIdx)));
+                    sections.func = createSection(3, payload);
+                }
+
+                if (memory.length > 0) {
+                    let payload = this._encodeULEB128(memory.length);
+                    memory.forEach(m => payload.push(0x00, ...this._encodeULEB128(m.min)));
+                    sections.memory = createSection(5, payload);
+                }
+
+                if (globals.length > 0) {
+                    let payload = this._encodeULEB128(globals.length);
+                    globals.forEach(g => {
+                        payload.push(g.type, g.mut, this.OP.i32_const, ...this._encodeSLEB128(g.initVal), this.OP.end);
+                    });
+                    sections.global = createSection(6, payload);
+                }
+
+                if (exports.length > 0) {
+                    let payload = this._encodeULEB128(exports.length);
+                    exports.forEach(exp => {
+                        payload.push(...this._encodeString(exp.name), exp.kind, ...this._encodeULEB128(exp.index));
+                    });
+                    sections.export = createSection(7, payload);
+                }
+
+                if (funcs.length > 0) {
+                    let payload = this._encodeULEB128(funcs.length);
+                    funcs.forEach(f => {
+                        let instrs = [];
+                        
+                        // FIX 2: Instruction-Level Cycle Accounting injection
+                        let cycleBudgetIdx = globalIdxMap['$cycle_budget'];
+                        if (isUserCode && cycleBudgetIdx !== undefined) {
+                            instrs.push(
+                                0x23, ...this._encodeULEB128(cycleBudgetIdx),
+                                0x41, 0x01,
+                                0x6B,
+                                0x24, ...this._encodeULEB128(cycleBudgetIdx),
+                                0x23, ...this._encodeULEB128(cycleBudgetIdx),
+                                0x41, 0x00,
+                                0x48,
+                                0x04, 0x40,
+                                0x00,
+                                0x0B
+                            );
+                        }
+
+                        const parseInst = (inst, target) => {
+                            if (Array.isArray(inst)) {
+                                for (let k = 1; k < inst.length; k++) parseInst(inst[k], target);
+                                parseInst(inst[0], target);
+                            } else {
+                                let opName = inst.replace(/\./g, '_');
+                                if (this.OP[opName] !== undefined) {
+                                    target.push(this.OP[opName]);
+                                    if (opName === 'if' || opName === 'block' || opName === 'loop') target.push(0x40);
+                                } else {
+                                    let prev = target[target.length - 1];
+                                    if (prev === this.OP.i32_const) {
+                                        target.pop();
+                                        target.push(this.OP.i32_const, ...this._encodeSLEB128(parseInt(inst)));
+                                    } else if (prev === this.OP.local_get || prev === this.OP.local_set || prev === this.OP.local_tee) {
+                                        target.pop();
+                                        let idx = inst.startsWith('$') ? f.localMap[inst] : parseInt(inst);
+                                        target.push(prev, ...this._encodeULEB128(idx));
+                                    } else if (prev === this.OP.global_get || prev === this.OP.global_set) {
+                                        target.pop();
+                                        let idx = inst.startsWith('$') ? globalIdxMap[inst] : parseInt(inst);
+                                        target.push(prev, ...this._encodeULEB128(idx));
+                                    } else if (prev === this.OP.call) {
+                                        target.pop();
+                                        let idx = inst.startsWith('$') ? globalFuncMap[inst] : parseInt(inst);
+                                        target.push(prev, ...this._encodeULEB128(idx));
+                                    } else if (prev === this.OP.i32_load || prev === this.OP.i32_store || prev === this.OP.i32_store8) {
+                                        target.pop();
+                                        let offset = inst.startsWith('offset=') ? parseInt(inst.split('=')[1]) : 0;
+                                        target.push(prev, ...this._encodeULEB128(0), ...this._encodeULEB128(offset));
+                                    }
+                                }
+                            }
+                        };
+
+                        for (let k = 0; k < f.body.length; k++) parseInst(f.body[k], instrs);
+                        instrs.push(this.OP.end);
+
+                        let localGroups = [];
+                        let curType = null, count = 0;
+                        for (let t of f.locals) {
+                            if (t === curType) count++;
+                            else {
+                                if (count > 0) localGroups.push({count, type: curType});
+                                curType = t; count = 1;
+                            }
+                        }
+                        if (count > 0) localGroups.push({count, type: curType});
+
+                        let localBytes = [...this._encodeULEB128(localGroups.length)];
+                        for (let g of localGroups) {
+                            localBytes.push(...this._encodeULEB128(g.count), g.type);
+                        }
+
+                        let funcBytes = [...localBytes, ...instrs];
+                        sections.code.push(...this._encodeULEB128(funcBytes.length), ...funcBytes);
+                    });
+                    sections.code = createSection(10, [ ...this._encodeULEB128(funcs.length), ...sections.code ]);
+                }
+
+                if (data.length > 0) {
+                    let payload = this._encodeULEB128(data.length);
+                    data.forEach(d => {
+                        payload.push(0x00, this.OP.i32_const, ...this._encodeSLEB128(parseInt(d.offset[1])), this.OP.end);
+                        payload.push(...this._encodeULEB128(d.bytes.length), ...d.bytes);
+                    });
+                    sections.data = createSection(11, payload);
+                }
+
+                return new Uint8Array([
+                    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00,
+                    ...sections.type, ...sections.import, ...sections.func, ...sections.memory,
+                    ...sections.global, ...sections.export, ...sections.code, ...sections.data
+                ]);
+            }
+        }
+
+        // =====================================================================
+        // 2. THE KERNEL RUNTIME (Inner Sanctum + Bridge)
+        // =====================================================================
+
+        const INNER_SANCTUM_WAT = `
+        (module
+          (import "kernel" "syscall" (func $syscall (param i32 i32 i32) (result i32)))
+          (import "kernel" "mem_grow" (func $mem_grow (param i32) (result i32)))
+          (import "kernel" "time_ms" (func $time_ms (result i64)))
+          (import "kernel" "random" (func $random (result i32)))
+          
+          (memory (export "mem") 1 256)
+          
+          (global $heap_ptr (mut i32) (i32.const 0x10000))
+          
+          (data (i32.const 0x1000) "\\00")
+          (data (i32.const 0x2000) "\\00")
+          
+          (func (export "init") (result i32)
+            i32.const 0x1000
+          )
+          
+          (func (export "alloc") (param $size i32) (result i32)
+            global.get $heap_ptr
+            global.get $heap_ptr
+            local.get $size
+            i32.add
+            global.set $heap_ptr
+          )
+          
+          (func (export "free") (param $ptr i32)
+            drop
+          )
+          
+          (func (export "get_output_buffer") (result i32) i32.const 0x1000)
+          (func (export "get_error_buffer") (result i32) i32.const 0x2000)
+          
+          (func (export "run") (param $ptr i32) (param $len i32) (result i32)
+            i32.const 0
+            local.get $ptr
+            local.get $len
+            call $syscall
+            drop
+            i32.const 42
+          )
+          
+          (global $cycle_budget (export "cycle_budget") (mut i32) (i32.const 0))
+          
+          (func (export "set_cycle_budget") (param $cycles i32)
+            local.get $cycles
+            global.set $cycle_budget
+          )
+          
+          (func (export "get_remaining_cycles") (result i32)
+            global.get $cycle_budget
+          )
+          
+          (func $consume_cycle
+            global.get $cycle_budget
+            i32.const 1
+            i32.sub
+            global.set $cycle_budget
+            global.get $cycle_budget
+            i32.const 0
+            i32.lt_s
+            if
+              unreachable
+            end
+          )
+        )`;
+
+        class Kernel {
+            constructor() {
+                this.innerSanctum = null;
+                this.instance = null;
+                this.outputBuffer = "";
+                this.cycles = 0;
+                this.startTime = 0;
+                
+                // Multitasking
+                this.yielded = false;
+                this.stepMode = false;
+                
+                this.onOutput = (text) => {};
+                this.onStateChange = (state) => {};
+            }
+
+            async boot() {
+                try {
+                    const assembler = new WATAssembler();
+                    const innerWasmBytes = assembler.compile(INNER_SANCTUM_WAT, false);
+                    
+                    const env = {
+                        kernel: {
+                            syscall: this._sys_call.bind(this),
+                            mem_grow: (pages) => {
+                                try {
+                                    const old = this.memory.buffer.byteLength / 65536;
+                                    this.memory.grow(pages);
+                                    return old;
+                                } catch(e) { return -1; }
+                            },
+                            time_ms: () => BigInt(Date.now() - this.startTime),
+                            random: () => typeof crypto !== 'undefined' ? crypto.getRandomValues(new Uint32Array(1))[0] : Math.floor(Math.random() * 0xFFFFFFFF)
+                        }
+                    };
+
+                    const module = await WebAssembly.instantiate(innerWasmBytes, env);
+                    this.innerSanctum = module.instance;
+                    this.memory = this.innerSanctum.exports.mem;
+                    this.innerSanctum.exports.init();
+                    
+                    this.onStateChange('ready');
+                    return this;
+                } catch (e) {
+                    console.error("Inner Sanctum boot failed:", e);
+                    throw e;
+                }
+            }
+
+            _sys_call(id, arg1, arg2) {
+                // Cooperative YIELD
+                if (id === 6 || this.stepMode) {
+                    this.yielded = true;
+                    this.stepMode = false;
+                    throw new Error("Yield");
+                }
+
+                switch(id) {
+                    case 0: // SYS_PRINT
+                        const bytes = new Uint8Array(this.memory.buffer, arg1, arg2);
+                        const text = new TextDecoder('utf-8').decode(bytes);
+                        this.outputBuffer += text;
+                        this.onOutput(text);
+                        return arg2;
+                    case 1: // SYS_EXIT
+                        throw new Error(`Kernel Exit (Code: ${arg1})`);
+                    case 2: // SYS_TIME
+                        return Date.now() - this.startTime;
+                    case 3: // SYS_RANDOM
+                        return typeof crypto !== 'undefined' ? crypto.getRandomValues(new Uint32Array(1))[0] : Math.floor(Math.random() * 0xFFFFFFFF);
+                    case 4: // SYS_MEMORY_STATS
+                        return this.memory.buffer.byteLength / (64 * 1024);
+                    default: return -1;
+                }
+            }
+
+            async compileAndLoad(watCode) {
+                this.onStateChange('compiling');
+                try {
+                    const assembler = new WATAssembler();
+                    const wasmBytes = assembler.compile(watCode, true);
+                    
+                    const env = {
+                        inner: this.innerSanctum.exports,
+                        kernel: { syscall: this._sys_call.bind(this) }
+                    };
+
+                    const module = await WebAssembly.instantiate(wasmBytes, env);
+                    this.instance = module.instance;
+                    
+                    this.onStateChange('ready');
+                    return true;
+                } catch (e) {
+                    this.onOutput(`\x1b[31m[KERNEL PANIC] Compilation failed: ${e.message}\x1b[0m\n`);
+                    this.onStateChange('error');
+                    throw e;
+                }
+            }
+
+            run() {
+                if (!this.instance || !this.instance.exports.run) throw new Error("Module not loaded or lacks 'run' export");
+
+                this.onStateChange('running');
+                if (!this.yielded) {
+                    this.outputBuffer = "";
+                    this.cycles = 0;
+                    this.startTime = Date.now();
+                }
+                
+                this.yielded = false;
+                const budget = 1000000;
+                this.innerSanctum.exports.set_cycle_budget(budget);
+
+                try {
+                    const result = this.instance.exports.run();
+                    const remaining = this.innerSanctum.exports.get_remaining_cycles();
+                    this.cycles += (budget - remaining);
+                    
+                    const duration = Date.now() - this.startTime;
+                    this.onOutput(`\x1b[32m\n[KERNEL] Process exited normally (Result: ${result}, Time: ${duration}ms, Cycles: ${this.cycles})\x1b[0m\n`);
+                    this.onStateChange('ready');
+                    return { status: 'success', result, output: this.outputBuffer, cycles: this.cycles };
+                } catch (e) {
+                    const remaining = this.innerSanctum.exports.get_remaining_cycles();
+                    this.cycles += (budget - remaining);
+                    
+                    if (e.message.includes("Yield")) {
+                        this.onStateChange('yielded');
+                        return { status: 'yielded', output: this.outputBuffer, cycles: this.cycles };
+                    }
+                    if (e.message.includes("Kernel Exit")) {
+                        this.onOutput(`\x1b[33m\n[KERNEL] ${e.message}\x1b[0m\n`);
+                        this.onStateChange('ready');
+                        return { status: 'exited', output: this.outputBuffer };
+                    }
+                    
+                    let errStr = e.message;
+                    if (errStr.includes('unreachable') && remaining <= 0) {
+                        errStr = "Cycle Budget Exhausted (Trap)";
+                    }
+                    this.onOutput(`\x1b[31m\n[KERNEL PANIC] Runtime exception: ${errStr}\x1b[0m\n`);
+                    this.onStateChange('error');
+                    return { status: 'error', error: errStr };
+                }
+            }
+
+            yield() {
+                this.yielded = true;
+                this.stepMode = true;
+            }
+
+            resume() {
+                return this.run();
+            }
+
+            snapshot() {
+                const buffer = new Uint8Array(this.memory.buffer);
+                const clone = new Uint8Array(buffer.length);
+                clone.set(buffer);
+                return clone.buffer;
+            }
+
+            restore(arrayBuffer) {
+                const current = new Uint8Array(this.memory.buffer);
+                const source = new Uint8Array(arrayBuffer);
+                if (source.length > current.length) {
+                    const pagesNeeded = Math.ceil((source.length - current.length) / (64 * 1024));
+                    this.memory.grow(pagesNeeded);
+                }
+                const newCurrent = new Uint8Array(this.memory.buffer);
+                newCurrent.set(source);
+                this.onOutput(`\x1b[36m[KERNEL] System state restored (${source.length} bytes)\x1b[0m\n`);
+            }
+        }
+
+        // =====================================================================
+        // 3. OUTER SHELL (Host Integration)
+        // =====================================================================
+
+        let activeKernel = new Kernel();
+
+        window.WASMKernel = {
+            version: '2.0.0',
+            mode: EMBED_MODE,
+            
+            boot: async () => {
+                activeKernel = new Kernel();
+                return activeKernel.boot();
+            },
+            
+            exec: async (watCode) => {
+                await activeKernel.compileAndLoad(watCode);
+                return activeKernel.run();
+            },
+            
+            compile: (wat) => {
+                const assembler = new WATAssembler();
+                return assembler.compile(wat, true);
+            },
+            
+            memory: () => activeKernel.memory,
+            stats: () => ({ cycles: activeKernel.cycles, pages: activeKernel.memory.buffer.byteLength / 65536 }),
+            
+            snapshot: () => activeKernel.snapshot(),
+            restore: (buf) => activeKernel.restore(buf),
+            
+            _getKernelInstance: () => activeKernel
+        };
+
+        // postMessage API for Iframe Embedding
+        window.addEventListener('message', (event) => {
+            const d = event.data;
+            if (!d || d.target !== 'wasm-kernel') return;
+            switch(d.action) {
+                case 'exec':
+                    window.WASMKernel.exec(d.code).then(result => {
+                        event.source.postMessage({ source: 'wasm-kernel', id: d.id, result }, '*');
+                    });
+                    break;
+                case 'snapshot':
+                    event.source.postMessage({ source: 'wasm-kernel', id: d.id, snapshot: window.WASMKernel.snapshot() }, '*');
+                    break;
+                case 'restore':
+                    window.WASMKernel.restore(d.buffer);
+                    event.source.postMessage({ source: 'wasm-kernel', id: d.id, status: 'restored' }, '*');
+                    break;
+            }
+        });
+
+    </script>
+
 <script>
 'use strict';
 
@@ -410,6 +1160,125 @@ function computeFP(text){
   for(let i=0;i<t.length;i++)toks.push(Math.min(127,t.charCodeAt(i)));
   return computeFPFromToks(toks);
 }
+
+/* ═══════════════════════════════════════════════════════════
+   ROSA-ANS Codec  §1.1  v0.7
+   WASMKernel-accelerated rANS byte-level compression.
+   Hot loops run as native i32 WASM via ConsciousNode WASMKernal.
+   JS fallback active if kernel unavailable.
+
+   Memory layout in kernel shared memory:
+     0x10000  freq table  — 256 × 4 bytes (Uint32, ROSA-weighted counts)
+     0x14000  cum table   — 257 × 4 bytes (Uint32, cumulative)
+     0x15404  total       — 4 bytes (Uint32)
+     0x18000  src buffer  — input bytes
+     0x80000  dst buffer  — output bytes
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── ANS codec WASM binary (hand-assembled, 968 bytes) ─────── */
+/* L=32768, total=256 rANS. Exports: build_freq, build_cum, ans_encode, ans_decode */
+/* Imports: inner.mem (shared kernel memory) */
+const ANS_WASM_BYTES = new Uint8Array([0,97,115,109,1,0,0,0,1,28,5,96,2,127,127,0,96,0,0,96,3,127,127,127,1,127,96,4,127,127,127,127,1,127,96,0,1,127,2,16,1,5,105,110,110,101,114,3,109,101,109,2,1,1,128,2,3,6,5,0,1,2,3,4,7,58,5,10,98,117,105,108,100,95,102,114,101,113,0,0,9,98,117,105,108,100,95,99,117,109,0,1,10,97,110,115,95,101,110,99,111,100,101,0,2,10,97,110,115,95,100,101,99,111,100,101,0,3,3,114,117,110,0,4,10,201,6,5,169,1,1,3,127,65,0,33,2,2,64,3,64,32,2,65,128,2,79,13,1,65,128,128,4,32,2,65,2,116,106,65,1,54,2,0,32,2,65,1,106,33,2,12,0,11,11,65,0,33,2,2,64,3,64,32,2,32,1,79,13,1,32,0,32,2,106,45,0,0,33,3,65,128,128,4,32,3,65,2,116,106,65,128,128,4,32,3,65,2,116,106,40,2,0,65,1,106,54,2,0,32,2,65,1,106,33,2,12,0,11,11,65,0,33,4,65,0,33,2,2,64,3,64,32,2,65,128,2,79,13,1,32,4,65,128,128,4,32,2,65,2,116,106,40,2,0,106,33,4,32,2,65,1,106,33,2,12,0,11,11,65,132,168,5,32,4,54,2,0,11,78,1,2,127,65,0,33,1,65,0,33,0,2,64,3,64,32,0,65,128,2,79,13,1,65,128,128,5,32,0,65,2,116,106,32,1,54,2,0,32,1,65,128,128,4,32,0,65,2,116,106,40,2,0,106,33,1,32,0,65,1,106,33,0,12,0,11,11,65,132,168,5,65,128,2,54,2,0,11,179,2,1,8,127,65,128,128,2,33,7,65,0,33,8,32,1,65,1,107,33,3,2,64,3,64,32,3,65,0,72,13,1,32,0,32,3,106,45,0,0,33,4,65,128,128,4,32,4,65,2,116,106,40,2,0,33,5,65,128,128,5,32,4,65,2,116,106,40,2,0,33,6,2,64,3,64,32,7,32,5,65,15,116,73,13,1,32,2,32,8,106,32,7,65,255,1,113,58,0,0,32,8,65,1,106,33,8,32,7,65,8,118,33,7,12,0,11,11,32,7,32,5,110,65,8,116,32,6,106,32,7,32,5,112,106,33,7,32,3,65,1,107,33,3,12,0,11,11,32,2,32,8,106,32,7,65,255,1,113,58,0,0,32,2,32,8,65,1,106,106,32,7,65,8,118,65,255,1,113,58,0,0,32,2,32,8,65,2,106,106,32,7,65,16,118,65,255,1,113,58,0,0,32,2,32,8,65,3,106,106,32,7,65,24,118,65,255,1,113,58,0,0,32,8,65,4,106,33,8,65,0,33,3,32,8,65,1,107,33,10,2,64,3,64,32,3,32,10,79,13,1,32,2,32,3,106,45,0,0,33,9,32,2,32,3,106,32,2,32,10,106,45,0,0,58,0,0,32,2,32,10,106,32,9,58,0,0,32,3,65,1,106,33,3,32,10,65,1,107,33,10,12,0,11,11,32,8,11,146,2,1,10,127,32,0,45,0,0,65,24,116,33,6,32,0,65,1,106,45,0,0,65,16,116,32,6,114,33,6,32,0,65,2,106,45,0,0,65,8,116,32,6,114,33,6,32,0,65,3,106,45,0,0,32,6,114,33,6,65,4,33,5,65,0,33,4,2,64,3,64,32,4,32,3,79,13,1,32,6,65,255,1,113,33,7,65,0,33,8,65,255,1,33,9,2,64,3,64,32,8,32,9,79,13,1,32,8,32,9,106,65,1,106,65,1,118,33,10,65,128,128,5,32,10,65,2,116,106,40,2,0,32,7,77,4,64,32,10,33,8,5,32,10,65,1,107,33,9,11,12,0,11,11,32,8,33,11,32,2,32,4,106,32,11,58,0,0,65,128,128,4,32,11,65,2,116,106,40,2,0,33,12,65,128,128,5,32,11,65,2,116,106,40,2,0,33,13,32,12,32,6,65,8,118,108,32,7,106,32,13,107,33,6,2,64,3,64,32,6,65,128,128,2,79,13,1,32,5,32,1,79,13,1,32,6,65,8,116,32,0,32,5,106,45,0,0,114,33,6,32,5,65,1,106,33,5,12,0,11,11,32,4,65,1,106,33,4,12,0,11,11,32,3,11,4,0,65,0,11]);
+
+/* ── WASM Kernel codec state ──────────────────────────────── */
+let _wasmCodec = null;
+let _wasmBooting = null;
+
+const FREQ_BASE  = 0x10000;
+const CUM_BASE   = 0x14000;
+const TOTAL_ADDR = 0x15404;
+const SRC_BASE   = 0x18000;
+const DST_BASE   = 0x80000;
+const MAX_CODEC_BYTES = 0x60000; // ~384KB safe input limit
+
+async function _bootWasmCodec() {
+  if (_wasmCodec) return _wasmCodec;
+  if (_wasmBooting) return _wasmBooting;
+  _wasmBooting = (async () => {
+    try {
+      // Codec runs on its own private memory — no WASMKernel dependency
+      const mem = new WebAssembly.Memory({initial:16, maximum:256});
+      const result = await WebAssembly.instantiate(ANS_WASM_BYTES, {inner:{mem}});
+      _wasmCodec = { exports: result.instance.exports, mem };
+      console.log('[FPSS] ANS codec online ✓ (968-byte hand-assembled WASM, standalone)');
+      return _wasmCodec;
+    } catch(e) {
+      console.warn('[FPSS] WASM codec boot failed, using JS fallback:', e.message);
+      _wasmCodec = null; return null;
+    }
+  })();
+  return _wasmBooting;
+}
+
+/* Normalize raw freq (Uint32Array from WASM) to sum exactly 256 */
+function _normalizeFreq(freq32) {
+  const total = Array.from(freq32).reduce((a,b)=>a+b,0);
+  const norm = Array.from(freq32).map(f=>Math.max(1, Math.floor(f*256/total)));
+  let diff = 256 - norm.reduce((a,b)=>a+b,0);
+  const order = Array.from({length:256},(_,i)=>i).sort((a,b)=>
+    (freq32[b]*256/total - norm[b]) - (freq32[a]*256/total - norm[a]));
+  for(let i=0;i<Math.abs(diff);i++) norm[order[i]] += (diff>0?1:-1);
+  let s=norm.reduce((a,b)=>a+b,0); if(s!==256) norm[order[0]]+=(256-s);
+  return norm;
+}
+
+/* ── WASM-accelerated compress/decompress ─────────────────── */
+/* Stream format:
+   [0-1]   magic 0xC5 0x17
+   [2-5]   orig_len big-endian u32
+   [6-261] freq table: 256 bytes (one byte per symbol, normalized to sum=256)
+   [262+]  rANS bitstream                                        */
+
+async function rosaANSCompressWasm(bytes) {
+  const codec = await _bootWasmCodec();
+  if (!codec || bytes.length > MAX_CODEC_BYTES) return null;
+  const {exports:exp, mem} = codec;
+  const heap = new Uint8Array(mem.buffer);
+  const freq32 = new Uint32Array(mem.buffer, FREQ_BASE, 256);
+
+  heap.set(bytes, SRC_BASE);
+  exp.build_freq(SRC_BASE, bytes.length);
+  const norm = _normalizeFreq(freq32);
+  for(let i=0;i<256;i++) freq32[i]=norm[i];
+  exp.build_cum();
+
+  const clen = exp.ans_encode(SRC_BASE, bytes.length, DST_BASE);
+  if (clen <= 0 || clen + 262 >= bytes.length) return null; // incompressible
+
+  const stream = new Uint8Array(clen);
+  stream.set(new Uint8Array(mem.buffer, DST_BASE, clen));
+
+  // Build output: magic + orig_len + freq[256] + stream
+  const out = new Uint8Array(262 + clen);
+  out[0]=0xC5; out[1]=0x17;
+  const L=bytes.length;
+  out[2]=(L>>24)&0xff; out[3]=(L>>16)&0xff; out[4]=(L>>8)&0xff; out[5]=L&0xff;
+  for(let i=0;i<256;i++) out[6+i]=norm[i]; // freq as single bytes (sum=256, max=255)
+  out.set(stream, 262);
+  return out;
+}
+
+async function rosaANSDecompressWasm(compressed) {
+  const codec = await _bootWasmCodec();
+  if (!codec) return null;
+  const {exports:exp, mem} = codec;
+  if (compressed[0]!==0xC5||compressed[1]!==0x17) return null;
+  const origLen=(compressed[2]<<24)|(compressed[3]<<16)|(compressed[4]<<8)|compressed[5];
+  if (origLen > MAX_CODEC_BYTES) return null;
+  const freq32 = new Uint32Array(mem.buffer, FREQ_BASE, 256);
+  for(let i=0;i<256;i++) freq32[i]=compressed[6+i];
+  exp.build_cum();
+  const stream = compressed.slice(262);
+  new Uint8Array(mem.buffer).set(stream, SRC_BASE);
+  exp.ans_decode(SRC_BASE, stream.length, DST_BASE, origLen);
+  const result = new Uint8Array(origLen);
+  result.set(new Uint8Array(mem.buffer, DST_BASE, origLen));
+  return result;
+}
+
+/* Kick off kernel boot immediately so it's ready when first file drops */
+_bootWasmCodec();
+
 
 /* ═══════════════════════════════════════════════════════════
    BitNet b1.58 ternary packing  §1.3
@@ -681,14 +1550,18 @@ async function ingest(file){
     if(!imgData)return ingestPassthrough(file,fid,route,ts);
     const{packed,thumbnail,gridW,gridH,W,H}=imgData;
     const buf=await file.arrayBuffer();
-    const stored=bytesToBase64(new Uint8Array(buf));
+    const rawBytes=new Uint8Array(buf);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     A.sheaf.add('image',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
     A.files.push({
       id:fid,filename:file.name,size:file.size,type:file.type||'image/unknown',
-      ts,route,passthrough:false,stored,fullText:'',
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
       chunks:[`[image: ${W}×${H} · ${gridW*gridH} patches · ElasticTok spatial]`],
       packedFps:[Array.from(packed)],
-      thumbnail,imageW:W,imageH:H,gridW,gridH
+      thumbnail,imageW:W,imageH:H,gridW,gridH,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
     });
     A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
     A.sealedAt=null;A.parity=null;refresh();return;
@@ -700,14 +1573,18 @@ async function ingest(file){
     if(!audData)return ingestPassthrough(file,fid,route,ts);
     const{packed,duration,sampleRate,totalSpikes}=audData;
     const buf=await file.arrayBuffer();
-    const stored=bytesToBase64(new Uint8Array(buf));
+    const rawBytes=new Uint8Array(buf);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     A.sheaf.add('audio',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
     A.files.push({
       id:fid,filename:file.name,size:file.size,type:file.type||'audio/unknown',
-      ts,route,passthrough:false,stored,fullText:'',
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
       chunks:[`[audio: ${duration.toFixed(2)}s @ ${sampleRate}Hz · ${totalSpikes} spikes · SpikeVox LIF]`],
       packedFps:[Array.from(packed)],
-      duration,sampleRate,totalSpikes
+      duration,sampleRate,totalSpikes,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
     });
     A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
     A.sealedAt=null;A.parity=null;refresh();return;
@@ -719,34 +1596,43 @@ async function ingest(file){
     if(!wData)return ingestPassthrough(file,fid,route,ts);
     const{packed,numParams,ternaryBytes,float32Bytes,ratio}=wData;
     const buf=await file.arrayBuffer();
-    const stored=bytesToBase64(new Uint8Array(buf));
+    const rawBytes=new Uint8Array(buf);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     A.sheaf.add('weights',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
     A.files.push({
       id:fid,filename:file.name,size:file.size,type:file.type||'application/octet-stream',
-      ts,route,passthrough:false,stored,fullText:'',
-      chunks:[`[weights: ${numParams.toLocaleString()} params · b1.58 ${ratio} · ${fmtSz(ternaryBytes)} ternary / ${fmtSz(float32Bytes)} fp32]`],
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+      chunks:[`[weights: ${numParams.toLocaleString()} params · b1.58 ${ratio} · ROSA-ANS ${compRatio}]`],
       packedFps:[Array.from(packed)],
-      numParams,ternaryBytes,float32Bytes,compressionRatio:ratio
+      numParams,ternaryBytes,float32Bytes,compressionRatio:compRatio,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length
     });
     A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
     A.sealedAt=null;A.parity=null;refresh();return;
   }
 
-  /* ── Text / JSON — OOMB chunked fingerprinting ──────────── */
+  /* ── Text / JSON — ROSA-ANS byte compression + chunked fingerprinting ── */
   if(route===ROUTE_TEXT||route===ROUTE_JSON){
     const text=await file.text();
+    const rawBytes=new TextEncoder().encode(text);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     const chunks=mkChunks(text);const packedFps=[];
     for(let i=0;i<chunks.length;i++){
       const fp=computeFP(chunks[i]);
       const packed=ternaryPack(fp);
       packedFps.push(Array.from(packed));
-      A.sheaf.add('text',ternaryUnpack(packed),{fid,ci:i,fn:file.name});
+      A.sheaf.add(route==='json'?'json':'text',ternaryUnpack(packed),{fid,ci:i,fn:file.name});
       if(i%4===0)await new Promise(r=>setTimeout(r,0));
     }
     A.files.push({
       id:fid,filename:file.name,size:file.size,type:file.type||'text/plain',
-      ts,route,passthrough:false,stored:'',
-      chunks,packedFps,fullText:text
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+      chunks,packedFps,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
     });
     A.totalSize+=file.size;A.totalChunks+=chunks.length;A.routedCount++;
     A.sealedAt=null;A.parity=null;refresh();return;
@@ -770,18 +1656,20 @@ async function ingestPassthrough(file,fid,route,ts){
 /* ═══════════════════════════════════════════════════════════
    Extract / Delete
    ═══════════════════════════════════════════════════════════ */
-function extractFile(id){
+async function extractFile(id){
   const f=A.files.find(x=>x.id===id);if(!f)return;
-  // image/audio/weights: stored is base64; text: fullText
+  let bytes;
   if(f.stored){
-    const bin=atob(f.stored);const bytes=new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-    const blob=new Blob([bytes],{type:f.type});
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    const bin=atob(f.stored);const raw=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)raw[i]=bin.charCodeAt(i);
+    bytes=f.ansCompressed?await rosaANSDecompress(raw):raw;
   }else if(f.fullText){
-    dl(f.fullText,f.filename,f.type);
-  }
+    // legacy v0.5 archives
+    bytes=new TextEncoder().encode(f.fullText);
+  }else return;
+  const blob=new Blob([bytes],{type:f.type});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 
 function deleteFile(id){
@@ -1014,7 +1902,7 @@ input.li:focus{border-color:#c89b4a;}
       <div id="rinfo"></div>
       <table class="route-tbl" style="margin-top:12px;">
         <tr><th>Type</th><th>Route</th><th>Status</th></tr>
-        <tr><td>text · code</td><td>ROSA + ternary-b1.58</td><td class="rt-active">✓ active</td></tr>
+        <tr><td>text · code · all types</td><td>ROSA-ANS byte compression</td><td class="rt-active">✓ v0.7</td></tr>
         <tr><td>image/*</td><td>ElasticTok spatial</td><td class="rt-active">✓ active v0.5</td></tr>
         <tr><td>audio/*</td><td>SpikeVox LIF</td><td class="rt-active">✓ active v0.5</td></tr>
         <tr><td>neural weights</td><td>BitNet b1.58 ternary</td><td class="rt-active">✓ active v0.5</td></tr>
@@ -1045,6 +1933,33 @@ let D=null,selFid=null;
 function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;const s=2*n+1,b=new Array(s).fill(null).map(()=>({})),c=new Int32Array(s).fill(-1),d=new Int32Array(s).fill(0),e=new Int32Array(s).fill(-1);let g=0,z=1;for(let i=0;i<n;i++){const t=x[i];let r=z++;b[r]={};d[r]=d[g]+1;let p=g;while(p!==-1&&!(t in b[p])){b[p][t]=r;p=c[p];}if(p===-1){c[r]=0;}else{const q=b[p][t];if(d[p]+1===d[q]){c[r]=q;}else{const u=z++;b[u]=Object.assign({},b[q]);d[u]=d[p]+1;c[u]=c[q];e[u]=e[q];while(p!==-1&&b[p][t]===q){b[p][t]=u;p=c[p];}c[q]=c[r]=u;}}let v=g=r,a=-1;while(v!==-1){if(d[v]>0&&e[v]>=0){a=(x[e[v]+1]!==undefined)?x[e[v]+1]:-1;break;}v=c[v];}y[i]=a;v=g;while(v!==-1&&e[v]<i){e[v]=i;v=c[v];}}return y;}
 function computeFP(text){const t=text.slice(0,1024),toks=[];for(let i=0;i<t.length;i++)toks.push(Math.min(127,t.charCodeAt(i)));if(toks.length<2)return new Float32Array(128);const preds=ROSA(toks),hist=new Float32Array(128);for(const p of preds)if(p>=0&&p<128)hist[p]++;for(const tok of toks)hist[tok]+=.1;let norm=0;for(let i=0;i<128;i++)norm+=hist[i]**2;norm=Math.sqrt(norm)+1e-8;for(let i=0;i<128;i++)hist[i]/=norm;return hist;}
 function ternaryUnpack(packed){const fp=new Float32Array(128);for(let i=0;i<32;i++){const byte=packed[i];for(let j=0;j<4;j++){const q=(byte>>((3-j)*2))&0b11;fp[i*4+j]=q===0b00?-1:q===0b10?1:0;}}let norm=0;for(let i=0;i<128;i++)norm+=fp[i]**2;norm=Math.sqrt(norm)+1e-8;for(let i=0;i<128;i++)fp[i]/=norm;return fp;}
+/* ROSA-ANS Decoder (seed reader copy) */
+function _deserializeFreq(buf){const freq=new Uint32Array(256);for(let i=0;i<256;i++){freq[i]=(buf[i*2]<<8)|buf[i*2+1];if(freq[i]<1)freq[i]=1;}return freq;}
+function _buildCumFreq(freq){const cum=new Uint32Array(257);let total=0;for(let i=0;i<256;i++)total+=freq[i];let s=0;for(let i=0;i<256;i++){cum[i]=s;s+=freq[i];}cum[256]=total;return{cum,total};}
+function rosaANSDecompress(compressed){
+  if(compressed.length===0)return new Uint8Array(0);
+  if(compressed[0]!==0xC5||compressed[1]!==0x17)return compressed;// not compressed, return as-is
+  const origLen=(compressed[2]<<24)|(compressed[3]<<16)|(compressed[4]<<8)|compressed[5];
+  const freqBuf=compressed.slice(6,518);
+  const stream=compressed.slice(518);
+  const freq=_deserializeFreq(freqBuf);
+  const{cum,total}=_buildCumFreq(freq);
+  const L=1<<23;
+  let pos=0;
+  let state=(stream[pos]<<24)|(stream[pos+1]<<16)|(stream[pos+2]<<8)|stream[pos+3];pos+=4;
+  const out=new Uint8Array(origLen);
+  for(let i=0;i<origLen;i++){
+    const slot=state%total;
+    let lo=0,hi=255;
+    while(lo<hi){const mid=(lo+hi+1)>>1;if(cum[mid]<=slot)lo=mid;else hi=mid-1;}
+    const s=lo;out[i]=s;
+    const fs=freq[s],cs=cum[s];
+    state=fs*Math.floor(state/total)+(slot-cs);
+    while(state<L&&pos<stream.length){state=(state<<8)|stream[pos++];}
+  }
+  return out;
+}
+
 function dot(a,b){let s=0;for(let i=0;i<a.length;i++)s+=a[i]*b[i];return s;}
 function djb2(s){let h=5381;for(let i=0;i<s.length;i++)h=((h<<5)+h)+s.charCodeAt(i);return(h>>>0).toString(16);}
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
@@ -1123,6 +2038,15 @@ function renderBlist(){
   }).join('');
 }
 
+function fmtSz(b){if(b<1024)return b+' B';if(b<1<<20)return(b/1024).toFixed(1)+' KB';return(b/(1<<20)).toFixed(2)+' MB';}
+
+function compBadge(f){
+  if(f.passthrough)return '';
+  const ratio=f.compressionRatio||'—';
+  const col=f.ansCompressed?'#86efac':'#7a7498';
+  return '<div class="mc-stat" style="margin-top:6px;">ROSA-ANS: <span style="color:'+col+'">'+esc(ratio)+'</span>'+(f.origSize?' · '+fmtSz(f.origSize)+' → '+fmtSz(f.compSize):'')+'</div>';
+}
+
 function selFile(id){
   selFid=id;renderBlist();
   const f=D._files.find(x=>x.id===id);if(!f)return;
@@ -1137,6 +2061,7 @@ function selFile(id){
       +'<div class="mc-stat">dimensions: <span>'+f.imageW+'×'+f.imageH+'</span></div>'
       +'<div class="mc-stat">patches: <span>'+(f.gridW*f.gridH)+'</span> ('+f.gridW+'×'+f.gridH+' grid)</div>'
       +'<div class="mc-stat">route: <span>ElasticTok spatial → ternary-b1.58</span></div>'
+      +compBadge(f)
       +'<div class="mc-stat" style="margin-top:5px;font-size:9px;opacity:.6">'+esc(f.chunks[0]||'')+'</div></div>';
   }else if(route==='audio'){
     el.innerHTML='<div class="mc">'
@@ -1144,6 +2069,7 @@ function selFile(id){
       +'<div class="mc-stat">sample rate: <span>'+(f.sampleRate||0)+' Hz</span></div>'
       +'<div class="mc-stat">total spikes: <span>'+(f.totalSpikes||0).toLocaleString()+'</span></div>'
       +'<div class="mc-stat">route: <span>SpikeVox LIF → ternary-b1.58</span></div>'
+      +compBadge(f)
       +'<div class="mc-stat" style="margin-top:5px;font-size:9px;opacity:.6">'+esc(f.chunks[0]||'')+'</div></div>';
   }else if(route==='weights'){
     el.innerHTML='<div class="mc">'
@@ -1151,28 +2077,29 @@ function selFile(id){
       +'<div class="mc-stat">parameters: <span>'+(f.numParams||0).toLocaleString()+'</span></div>'
       +'<div class="mc-stat">fp32 size: <span>'+fmtSz(f.float32Bytes||0)+'</span></div>'
       +'<div class="mc-stat">ternary size: <span>'+fmtSz(f.ternaryBytes||0)+'</span></div>'
-      +'<div class="mc-stat">route: <span>BitNet b1.58 ternary</span></div>'
+      +'<div class="mc-stat">route: <span>BitNet b1.58 ternary + ROSA-ANS</span></div>'
+      +compBadge(f)
       +'<div class="mc-stat" style="margin-top:5px;font-size:9px;opacity:.6">'+esc(f.chunks[0]||'')+'</div></div>';
   }else{
-    el.innerHTML=(f.chunks||[]).map((c,i)=>'<div class="cc"><div class="cn">chunk '+(i+1)+'/'+(f.chunks||[]).length+'</div>'+esc(c)+'</div>').join('');
+    const compLine=f.compressionRatio?'<div style="font-size:9px;color:#7a7498;margin-bottom:8px;padding:5px 8px;background:#131120;border-radius:4px;">ROSA-ANS <span style="color:'+(f.ansCompressed?'#86efac':'#7a7498')+'">'+esc(f.compressionRatio)+'</span>'+(f.origSize?' · '+fmtSz(f.origSize)+' → '+fmtSz(f.compSize):'')+'</div>':'';
+    el.innerHTML=compLine+(f.chunks||[]).map((c,i)=>'<div class="cc"><div class="cn">chunk '+(i+1)+'/'+(f.chunks||[]).length+'</div>'+esc(c)+'</div>').join('');
   }
 }
-
-function fmtSz(b){if(b<1024)return b+' B';if(b<1<<20)return(b/1024).toFixed(1)+' KB';return(b/(1<<20)).toFixed(2)+' MB';}
 
 function extr(id){
   if(!D||!id)return;
   const f=D._files.find(x=>x.id===id);if(!f)return;
+  let bytes;
   if(f.stored){
-    const bin=atob(f.stored);const bytes=new Uint8Array(bin.length);
-    for(let i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);
-    const blob=new Blob([bytes],{type:f.type});
-    const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    const bin=atob(f.stored);const raw=new Uint8Array(bin.length);
+    for(let i=0;i<bin.length;i++)raw[i]=bin.charCodeAt(i);
+    try{bytes=f.ansCompressed?rosaANSDecompress(raw):raw;}catch(e){bytes=raw;}
   }else if(f.fullText){
-    const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([f.fullText],{type:f.type}));a.download=f.filename;a.click();
-    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
-  }
+    bytes=new TextEncoder().encode(f.fullText);
+  }else return;
+  const blob=new Blob([bytes],{type:f.type});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=f.filename;a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 
 function renderRouteInfo(){
@@ -1252,18 +2179,27 @@ async function doExp(){
     const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
     const key=await deriveKey(pw,salt);
     const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(json));
-    const wrap={cns_header:{version:'0.5',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.5'},
+    const wrap={cns_header:{version:'0.7',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.7'},
       salt:Array.from(salt),iv:Array.from(iv),payload:Array.from(new Uint8Array(cipher))};
-    dl(buildSeedReader(wrap,name),name+'.keyed.cns','text/html');
+    dl(buildSeedReader(wrap,name),name+'.keyed.cns','application/octet-stream');
   }else{
-    dl(buildSeedReader(payload,name),name+'.cns','text/html');
+    dl(buildSeedReader(payload,name),name+'.cns','application/octet-stream');
   }
 }
 
 async function importCNS(text,pw){
   let json=text;
-  const m=text.match(/const RAW\s*=\s*(\{[\s\S]*?\});\s*\n/);
-  if(m)json=m[1];
+  // Greedy extraction: find 'const RAW=' then extract JSON by counting braces
+  const rawIdx=text.indexOf('const RAW=');
+  if(rawIdx>=0){
+    let start=text.indexOf('{',rawIdx);
+    let depth=0,i=start;
+    while(i<text.length){
+      if(text[i]==='{')depth++;
+      else if(text[i]==='}'){depth--;if(depth===0){json=text.slice(start,i+1);break;}}
+      i++;
+    }
+  }
   const data=JSON.parse(json);
   if(data.cns_header?.keyed){
     if(!pw){alert('This archive is keyed. Enter the passphrase.');return;}
