@@ -356,7 +356,7 @@ input.mi:focus{border-color:var(--amber);}
           <div style="font-size:11px;color:var(--muted);line-height:1.8;margin-bottom:14px;">
             Runs the rANS compress/decompress cycle on three payload sizes using both the
             968-byte hand-assembled WASM codec and the pure JS fallback. Each path runs
-            <strong style="color:var(--text)">10 iterations</strong> and reports the
+            <strong style="color:var(--text)">5 iterations</strong> and reports the
             median time — median is more honest than mean because one slow GC pause won't
             skew the result. Speedup is WASM median ÷ JS median.
           </div>
@@ -2428,7 +2428,7 @@ async function loadCNS(inp){if(!inp.files[0])return;const pw=document.getElement
 /* ═══════════════════════════════════════════════════════════
    ANS Codec Benchmark
    Compares 968-byte hand-assembled WASM vs pure JS fallback.
-   Three payload sizes × 10 iterations each × 2 directions.
+   Three payload sizes × 5 iterations each × 2 directions.
    Reports median time (not mean — resistant to GC spikes).
    ═══════════════════════════════════════════════════════════ */
 
@@ -2554,11 +2554,11 @@ async function runBench() {
   btn.style.opacity = '0.4';
   results.innerHTML = '';
 
-  const ITERS = 10;
+  const ITERS = 5;
   const SIZES = [
-    { label: '10 KB',  bytes: 10_000,  type: 'text'   },
-    { label: '50 KB',  bytes: 50_000,  type: 'mixed'  },
-    { label: '100 KB', bytes: 100_000, type: 'text'   },
+    { label: '5 KB',   bytes: 5_000,   type: 'text'   },
+    { label: '20 KB',  bytes: 20_000,  type: 'mixed'  },
+    { label: '50 KB',  bytes: 50_000,  type: 'text'   },
   ];
 
   // Boot the WASM codec first — it pre-boots at load time but let's be sure
@@ -2607,8 +2607,10 @@ async function runBench() {
 
     // Warm-up
     jsANSCompress(payload);
+    await new Promise(r => setTimeout(r, 0));
 
     for (let i = 0; i < ITERS; i++) {
+      await new Promise(r => setTimeout(r, 0)); // yield — JS rANS is heavy on mobile
       const t0 = performance.now();
       const c = jsANSCompress(payload);
       jsCompTimes.push(performance.now() - t0);
@@ -2616,6 +2618,7 @@ async function runBench() {
     }
     if (jsCompressed) {
       for (let i = 0; i < ITERS; i++) {
+        await new Promise(r => setTimeout(r, 0));
         const t0 = performance.now();
         jsANSDecompress(jsCompressed);
         jsDecompTimes.push(performance.now() - t0);
