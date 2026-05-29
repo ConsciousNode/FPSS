@@ -287,6 +287,7 @@ input.mi:focus{border-color:var(--amber);}
         <div class="tab" onclick="sw('routing')">Routing</div>
         <div class="tab" onclick="sw('contra')">Contradictions</div>
         <div class="tab" onclick="sw('sheaf')">Sheaf</div>
+        <div class="tab" onclick="sw('bench')">Benchmark</div>
       </div>
       <div class="panel on" id="p-query">
         <div class="qhead">
@@ -349,9 +350,21 @@ input.mi:focus{border-color:var(--amber);}
           <div id="sheaf-stats" style="margin-top:14px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:2;"></div>
         </div>
       </div>
-    </main>
-  </div>
-  <div class="status-bar">
+      <div class="panel" id="p-bench">
+        <div class="scroll">
+          <div class="sec-lbl">ROSA-ANS Codec Benchmark — WASM vs JS</div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.8;margin-bottom:14px;">
+            Runs the rANS compress/decompress cycle on three payload sizes using both the
+            968-byte hand-assembled WASM codec and the pure JS fallback. Each path runs
+            <strong style="color:var(--text)">50 iterations</strong> and reports the
+            median time — median is more honest than mean because one slow GC pause won't
+            skew the result. Speedup is WASM median ÷ JS median.
+          </div>
+          <button class="btn btn-a" id="bench-run" onclick="runBench()">▶ Run Benchmark</button>
+          <div id="bench-status" style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:10px;min-height:18px;"></div>
+          <div id="bench-results" style="margin-top:14px;"></div>
+        </div>
+      </div>
     <div>files <span class="stv" id="s-f">0</span></div>
     <div>chunks <span class="stv" id="s-c">0</span></div>
     <div>routed <span class="stv" id="s-r">0</span></div>
@@ -1111,6 +1124,24 @@ input.mi:focus{border-color:var(--amber);}
 
 <script>
 'use strict';
+
+/* sw() hoisted — must be defined before any user interaction.
+   Tab onclick attributes fire as soon as the element is tapped;
+   on mobile browsers the script may not be fully parsed yet
+   if sw() lives at the bottom of a long block. */
+function sw(t){
+  activeTab=t;
+  ['query','browse','routing','contra','sheaf','bench'].forEach(n=>{
+    const el=document.getElementById('p-'+n);
+    if(el)el.className='panel'+(n===t?' on':'');
+  });
+  document.querySelectorAll('.tab').forEach((el,i)=>{
+    el.className='tab'+(['query','browse','routing','contra','sheaf','bench'][i]===t?' on':'');
+  });
+  if(t==='sheaf')renderPC();
+  if(t==='contra')renderContraFPSS();
+  if(t==='routing')renderRouting();
+}
 
 /* ═══════════════════════════════════════════════════════════
    ROSA suffix automaton
@@ -2219,15 +2250,6 @@ function dl(text,name,type){const a=document.createElement('a');a.href=URL.creat
 let selId=null,activeTab='query';
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-function sw(t){
-  activeTab=t;
-  ['query','browse','routing','contra','sheaf'].forEach(n=>{document.getElementById('p-'+n).className='panel'+(n===t?' on':'');});
-  document.querySelectorAll('.tab').forEach((el,i)=>{el.className='tab'+(['query','browse','routing','contra','sheaf'][i]===t?' on':'');});
-  if(t==='sheaf')renderPC();
-  if(t==='contra')renderContraFPSS();
-  if(t==='routing')renderRouting();
-}
-
 function doQ(){
   const text=document.getElementById('qi').value.trim();
   const el=document.getElementById('r-q');
@@ -2403,6 +2425,263 @@ function openImp(){document.getElementById('m-imp').classList.add('open');}
 function closeAll(){document.querySelectorAll('.overlay').forEach(m=>m.classList.remove('open'));}
 document.querySelectorAll('.overlay').forEach(m=>m.addEventListener('click',e=>{if(e.target===m)closeAll();}));
 async function loadCNS(inp){if(!inp.files[0])return;const pw=document.getElementById('imp-key').value,txt=await inp.files[0].text();closeAll();await importCNS(txt,pw);}
+/* ═══════════════════════════════════════════════════════════
+   ANS Codec Benchmark
+   Compares 968-byte hand-assembled WASM vs pure JS fallback.
+   Three payload sizes × 50 iterations each × 2 directions.
+   Reports median time (not mean — resistant to GC spikes).
+   ═══════════════════════════════════════════════════════════ */
+
+/* ── Pure JS rANS (identical algorithm to the WASM codec) ── */
+/* This is the baseline. Same math, no native acceleration.   */
+function jsANSCompress(bytes) {
+  // Build frequency table — count how often each byte value appears
+  const freq = new Uint32Array(256).fill(1); // floor at 1 so no symbol has 0 probability
+  for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
+
+  // Normalize to sum exactly 256 — same as WASM codec normalization
+  const total = freq.reduce((a, b) => a + b, 0);
+  const norm = Array.from(freq).map(f => Math.max(1, Math.floor(f * 256 / total)));
+  let diff = 256 - norm.reduce((a, b) => a + b, 0);
+  const order = Array.from({length:256},(_,i)=>i)
+    .sort((a,b) => (freq[b]*256/total - norm[b]) - (freq[a]*256/total - norm[a]));
+  for (let i = 0; i < Math.abs(diff); i++) norm[order[i]] += (diff > 0 ? 1 : -1);
+
+  // Build cumulative table — running sum of frequencies
+  const cum = new Uint32Array(257);
+  for (let i = 0; i < 256; i++) cum[i + 1] = cum[i] + norm[i];
+
+  // rANS encode — process bytes in reverse (ANS encodes backwards)
+  const L = 32768; // normalisation interval lower bound
+  let state = L;
+  const out = [];
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    const s = bytes[i], f = norm[s], c = cum[s];
+    // Flush low bits until state fits in normalisation interval
+    while (state >= f << 15) { out.push(state & 0xff); state >>= 8; }
+    // Encode: advance state using the symbol's frequency and cumulative
+    state = Math.floor(state / f) * 256 + c + (state % f);
+  }
+  // Flush final state (4 bytes, big-endian)
+  out.push(state & 0xff, (state >> 8) & 0xff, (state >> 16) & 0xff, (state >> 24) & 0xff);
+  out.reverse(); // ANS bitstream is reversed at output
+
+  // Package: magic + orig_len + freq[256] + bitstream
+  const stream = new Uint8Array(out);
+  const result = new Uint8Array(262 + stream.length);
+  result[0] = 0xC5; result[1] = 0x17;
+  const L2 = bytes.length;
+  result[2]=(L2>>24)&0xff; result[3]=(L2>>16)&0xff;
+  result[4]=(L2>>8)&0xff;  result[5]=L2&0xff;
+  for (let i = 0; i < 256; i++) result[6 + i] = norm[i];
+  result.set(stream, 262);
+  return result;
+}
+
+function jsANSDecompress(compressed) {
+  if (compressed[0] !== 0xC5 || compressed[1] !== 0x17) return null;
+  const origLen = (compressed[2]<<24)|(compressed[3]<<16)|(compressed[4]<<8)|compressed[5];
+  const norm = Array.from(compressed.slice(6, 262));
+  const cum = new Uint32Array(257);
+  for (let i = 0; i < 256; i++) cum[i + 1] = cum[i] + norm[i];
+
+  // Build decode table — map cumulative position back to symbol (binary search)
+  const stream = compressed.slice(262);
+  let pos = 0;
+  // Read initial state (4 bytes big-endian from start of stream)
+  let state = (stream[pos]<<24)|(stream[pos+1]<<16)|(stream[pos+2]<<8)|stream[pos+3];
+  pos += 4;
+
+  const out = new Uint8Array(origLen);
+  const L = 32768;
+  for (let i = 0; i < origLen; i++) {
+    // Binary search for symbol whose cumulative range contains (state % 256)
+    const slot = state & 0xff;
+    let lo = 0, hi = 255;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cum[mid] <= slot) lo = mid; else hi = mid - 1;
+    }
+    out[i] = lo;
+    const f = norm[lo], c = cum[lo];
+    state = f * (state >> 8) + slot - c;
+    // Refill state from bitstream when it drops below normalisation interval
+    while (state < L && pos < stream.length) {
+      state = (state << 8) | stream[pos++];
+    }
+  }
+  return out;
+}
+
+/* ── Timing harness ─────────────────────────────────────────
+   median() sorts the array and returns the middle value.
+   This is more trustworthy than mean because a single slow
+   iteration (e.g. GC pause, browser doing housekeeping)
+   won't drag the whole result up.                           */
+function median(arr) {
+  const s = [...arr].sort((a, b) => a - b);
+  const m = Math.floor(s.length / 2);
+  return s.length % 2 ? s[m] : (s[m-1] + s[m]) / 2;
+}
+
+/* Generate reproducible test payloads of different types:
+   - English-like text (high ROSA compressibility)
+   - Mixed content (moderate compressibility)
+   - Pseudo-random (low compressibility — worst case)        */
+function makePayload(size, type) {
+  const buf = new Uint8Array(size);
+  if (type === 'text') {
+    // Realistic byte distribution for ASCII text
+    const chars = 'etaoinshrdlucmfwypgbvkjxqz ETAOINSHRDLU.,\n';
+    for (let i = 0; i < size; i++) buf[i] = chars.charCodeAt(Math.floor(Math.random() * chars.length));
+  } else if (type === 'mixed') {
+    for (let i = 0; i < size; i++) buf[i] = Math.floor(Math.random() * 128);
+  } else {
+    // Full 0-255 uniform — hardest case for any compressor
+    crypto.getRandomValues(buf);
+  }
+  return buf;
+}
+
+let benchRunning = false;
+
+async function runBench() {
+  if (benchRunning) return;
+  benchRunning = true;
+  const btn = document.getElementById('bench-run');
+  const status = document.getElementById('bench-status');
+  const results = document.getElementById('bench-results');
+  btn.style.opacity = '0.4';
+  results.innerHTML = '';
+
+  const ITERS = 50;
+  const SIZES = [
+    { label: '10 KB',  bytes: 10_000,  type: 'text'   },
+    { label: '50 KB',  bytes: 50_000,  type: 'mixed'  },
+    { label: '100 KB', bytes: 100_000, type: 'text'   },
+  ];
+
+  // Boot the WASM codec first — it pre-boots at load time but let's be sure
+  status.textContent = 'Booting WASM codec…';
+  await _bootWasmCodec();
+
+  const wasmOk = !!_wasmCodec;
+  status.textContent = wasmOk
+    ? `WASM codec online ✓ — running ${ITERS} iterations per path per size…`
+    : `WASM unavailable — JS-only results`;
+
+  const rows = [];
+
+  for (const {label, bytes, type} of SIZES) {
+    const payload = makePayload(bytes, type);
+    status.textContent = `Benchmarking ${label} ${type} payload…`;
+    await new Promise(r => setTimeout(r, 0)); // yield to browser between sizes
+
+    // ── WASM path ──
+    let wasmCompTimes = [], wasmDecompTimes = [];
+    let wasmCompressed = null;
+    let wasmRatio = '—';
+
+    if (wasmOk) {
+      // Warm-up run (first call may incur JIT setup cost)
+      await rosaANSCompressWasm(payload);
+
+      for (let i = 0; i < ITERS; i++) {
+        const t0 = performance.now();
+        const c = await rosaANSCompressWasm(payload);
+        wasmCompTimes.push(performance.now() - t0);
+        if (i === 0 && c) { wasmCompressed = c; wasmRatio = (payload.length / c.length).toFixed(2) + '×'; }
+      }
+      if (wasmCompressed) {
+        for (let i = 0; i < ITERS; i++) {
+          const t0 = performance.now();
+          await rosaANSDecompressWasm(wasmCompressed);
+          wasmDecompTimes.push(performance.now() - t0);
+        }
+      }
+    }
+
+    // ── JS path ──
+    let jsCompTimes = [], jsDecompTimes = [];
+    let jsCompressed = null;
+
+    // Warm-up
+    jsANSCompress(payload);
+
+    for (let i = 0; i < ITERS; i++) {
+      const t0 = performance.now();
+      const c = jsANSCompress(payload);
+      jsCompTimes.push(performance.now() - t0);
+      if (i === 0) jsCompressed = c;
+    }
+    if (jsCompressed) {
+      for (let i = 0; i < ITERS; i++) {
+        const t0 = performance.now();
+        jsANSDecompress(jsCompressed);
+        jsDecompTimes.push(performance.now() - t0);
+      }
+    }
+
+    const wasmCompMed  = wasmOk ? median(wasmCompTimes).toFixed(2)  : null;
+    const wasmDecompMed= wasmOk ? median(wasmDecompTimes).toFixed(2): null;
+    const jsCompMed    = median(jsCompTimes).toFixed(2);
+    const jsDecompMed  = median(jsDecompTimes).toFixed(2);
+
+    const compSpeedup  = wasmOk ? (parseFloat(jsCompMed)   / parseFloat(wasmCompMed)).toFixed(1)  + '×' : '—';
+    const decompSpeedup= wasmOk ? (parseFloat(jsDecompMed) / parseFloat(wasmDecompMed)).toFixed(1) + '×' : '—';
+
+    rows.push({label, type, bytes: payload.length,
+      wasmComp: wasmCompMed, wasmDecomp: wasmDecompMed,
+      jsComp: jsCompMed, jsDecomp: jsDecompMed,
+      compSpeedup, decompSpeedup, ratio: wasmRatio});
+  }
+
+  status.textContent = `Done — ${ITERS} iterations per path, median reported.`;
+
+  // ── Render results ──────────────────────────────────────
+  results.innerHTML = rows.map(r => {
+    const speedF = parseFloat(r.compSpeedup);
+    const color = !wasmOk ? 'var(--muted)' : speedF >= 5 ? '#86efac' : speedF >= 2 ? 'var(--amber)' : 'var(--err)';
+    return `
+    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:13px 16px;margin-bottom:10px;">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
+        <span style="font-family:var(--mono);font-size:12px;font-weight:800;color:var(--text)">${r.label}</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">${r.type} payload</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">compression: <span style="color:var(--amber)">${r.ratio}</span></span>
+        <span style="margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:800;color:${color}">
+          ${wasmOk ? r.compSpeedup + ' faster (compress)' : 'WASM unavailable'}
+        </span>
+      </div>
+      <table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;">
+        <tr style="color:var(--muted);font-size:9px;letter-spacing:.2em;text-transform:uppercase;">
+          <td style="padding:4px 8px;">path</td>
+          <td style="padding:4px 8px;text-align:right;">compress (ms)</td>
+          <td style="padding:4px 8px;text-align:right;">decompress (ms)</td>
+          <td style="padding:4px 8px;text-align:right;">compress speedup</td>
+          <td style="padding:4px 8px;text-align:right;">decompress speedup</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border);">
+          <td style="padding:5px 8px;color:#86efac;font-weight:700;">WASM</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--text)">${r.wasmComp ?? '—'}</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--text)">${r.wasmDecomp ?? '—'}</td>
+          <td style="padding:5px 8px;text-align:right;color:${color};font-weight:800">${r.compSpeedup}</td>
+          <td style="padding:5px 8px;text-align:right;color:${color};font-weight:800">${r.decompSpeedup}</td>
+        </tr>
+        <tr style="border-top:1px solid var(--border);">
+          <td style="padding:5px 8px;color:var(--muted);">JS</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">${r.jsComp}</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">${r.jsDecomp}</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">1.0×</td>
+          <td style="padding:5px 8px;text-align:right;color:var(--muted)">1.0×</td>
+        </tr>
+      </table>
+    </div>`;
+  }).join('');
+
+  btn.style.opacity = '1';
+  benchRunning = false;
+}
+
 refresh();
 </script>
 </body>
