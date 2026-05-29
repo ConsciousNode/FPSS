@@ -2554,20 +2554,19 @@ async function runBench() {
   btn.style.opacity = '0.4';
   results.innerHTML = '';
 
-  const ITERS = 5;
   const SIZES = [
-    { label: '5 KB',   bytes: 5_000,   type: 'text'   },
-    { label: '20 KB',  bytes: 20_000,  type: 'mixed'  },
-    { label: '50 KB',  bytes: 50_000,  type: 'text'   },
+    { label: '1 KB',  bytes: 1_000,  type: 'text'  },
+    { label: '5 KB',  bytes: 5_000,  type: 'text'  },
+    { label: '10 KB', bytes: 10_000, type: 'mixed' },
   ];
 
-  // Boot the WASM codec first — it pre-boots at load time but let's be sure
+  // Boot the WASM codec first
   status.textContent = 'Booting WASM codec…';
   await _bootWasmCodec();
 
   const wasmOk = !!_wasmCodec;
   status.textContent = wasmOk
-    ? `WASM codec online ✓ — running ${ITERS} iterations per path per size…`
+    ? `WASM codec online ✓ — running single-pass timing per size…`
     : `WASM unavailable — JS-only results`;
 
   const rows = [];
@@ -2575,71 +2574,58 @@ async function runBench() {
   for (const {label, bytes, type} of SIZES) {
     const payload = makePayload(bytes, type);
     status.textContent = `Benchmarking ${label} ${type} payload…`;
-    await new Promise(r => setTimeout(r, 0)); // yield to browser between sizes
+    await new Promise(r => setTimeout(r, 0));
 
     // ── WASM path ──
-    let wasmCompTimes = [], wasmDecompTimes = [];
-    let wasmCompressed = null;
-    let wasmRatio = '—';
-
+    let wasmCompMs = null, wasmDecompMs = null, wasmRatio = '—';
     if (wasmOk) {
-      // Warm-up run (first call may incur JIT setup cost)
+      // warm-up
       await rosaANSCompressWasm(payload);
+      await new Promise(r => setTimeout(r, 0));
 
-      for (let i = 0; i < ITERS; i++) {
-        const t0 = performance.now();
-        const c = await rosaANSCompressWasm(payload);
-        wasmCompTimes.push(performance.now() - t0);
-        if (i === 0 && c) { wasmCompressed = c; wasmRatio = (payload.length / c.length).toFixed(2) + '×'; }
-      }
-      if (wasmCompressed) {
-        for (let i = 0; i < ITERS; i++) {
-          const t0 = performance.now();
-          await rosaANSDecompressWasm(wasmCompressed);
-          wasmDecompTimes.push(performance.now() - t0);
-        }
+      let t0 = performance.now();
+      const wasmC = await rosaANSCompressWasm(payload);
+      wasmCompMs = (performance.now() - t0).toFixed(1);
+
+      if (wasmC) {
+        wasmRatio = (payload.length / wasmC.length).toFixed(2) + '×';
+        await new Promise(r => setTimeout(r, 0));
+        t0 = performance.now();
+        await rosaANSDecompressWasm(wasmC);
+        wasmDecompMs = (performance.now() - t0).toFixed(1);
       }
     }
 
     // ── JS path ──
-    let jsCompTimes = [], jsDecompTimes = [];
-    let jsCompressed = null;
-
-    // Warm-up
-    jsANSCompress(payload);
+    await new Promise(r => setTimeout(r, 0));
+    // warm-up on half the payload
+    jsANSCompress(payload.slice(0, payload.length >> 1));
     await new Promise(r => setTimeout(r, 0));
 
-    for (let i = 0; i < ITERS; i++) {
-      await new Promise(r => setTimeout(r, 0)); // yield — JS rANS is heavy on mobile
-      const t0 = performance.now();
-      const c = jsANSCompress(payload);
-      jsCompTimes.push(performance.now() - t0);
-      if (i === 0) jsCompressed = c;
-    }
-    if (jsCompressed) {
-      for (let i = 0; i < ITERS; i++) {
-        await new Promise(r => setTimeout(r, 0));
-        const t0 = performance.now();
-        jsANSDecompress(jsCompressed);
-        jsDecompTimes.push(performance.now() - t0);
-      }
+    let t0 = performance.now();
+    const jsC = jsANSCompress(payload);
+    const jsCompMs = (performance.now() - t0).toFixed(1);
+
+    let jsDecompMs = null;
+    if (jsC) {
+      await new Promise(r => setTimeout(r, 0));
+      t0 = performance.now();
+      jsANSDecompress(jsC);
+      jsDecompMs = (performance.now() - t0).toFixed(1);
     }
 
-    const wasmCompMed  = wasmOk ? median(wasmCompTimes).toFixed(2)  : null;
-    const wasmDecompMed= wasmOk ? median(wasmDecompTimes).toFixed(2): null;
-    const jsCompMed    = median(jsCompTimes).toFixed(2);
-    const jsDecompMed  = median(jsDecompTimes).toFixed(2);
-
-    const compSpeedup  = wasmOk ? (parseFloat(jsCompMed)   / parseFloat(wasmCompMed)).toFixed(1)  + '×' : '—';
-    const decompSpeedup= wasmOk ? (parseFloat(jsDecompMed) / parseFloat(wasmDecompMed)).toFixed(1) + '×' : '—';
+    const compSpeedup  = wasmOk && wasmCompMs
+      ? (parseFloat(jsCompMs)   / parseFloat(wasmCompMs)).toFixed(1)  + '×' : '—';
+    const decompSpeedup = wasmOk && wasmDecompMs && jsDecompMs
+      ? (parseFloat(jsDecompMs) / parseFloat(wasmDecompMs)).toFixed(1) + '×' : '—';
 
     rows.push({label, type, bytes: payload.length,
-      wasmComp: wasmCompMed, wasmDecomp: wasmDecompMed,
-      jsComp: jsCompMed, jsDecomp: jsDecompMed,
+      wasmComp: wasmCompMs, wasmDecomp: wasmDecompMs,
+      jsComp: jsCompMs, jsDecomp: jsDecompMs,
       compSpeedup, decompSpeedup, ratio: wasmRatio});
   }
 
-  status.textContent = `Done — ${ITERS} iterations per path, median reported.`;
+  status.textContent = `Done — single-pass timing, each path run once after warm-up.`;
 
   // ── Render results ──────────────────────────────────────
   results.innerHTML = rows.map(r => {
