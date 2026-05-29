@@ -356,7 +356,7 @@ input.mi:focus{border-color:var(--amber);}
           <div style="font-size:11px;color:var(--muted);line-height:1.8;margin-bottom:14px;">
             Runs the rANS compress/decompress cycle on three payload sizes using both the
             968-byte hand-assembled WASM codec and the pure JS fallback. Each path runs
-            <strong style="color:var(--text)">50 iterations</strong> and reports the
+            <strong style="color:var(--text)">10 iterations</strong> and reports the
             median time — median is more honest than mean because one slow GC pause won't
             skew the result. Speedup is WASM median ÷ JS median.
           </div>
@@ -2428,7 +2428,7 @@ async function loadCNS(inp){if(!inp.files[0])return;const pw=document.getElement
 /* ═══════════════════════════════════════════════════════════
    ANS Codec Benchmark
    Compares 968-byte hand-assembled WASM vs pure JS fallback.
-   Three payload sizes × 50 iterations each × 2 directions.
+   Three payload sizes × 10 iterations each × 2 directions.
    Reports median time (not mean — resistant to GC spikes).
    ═══════════════════════════════════════════════════════════ */
 
@@ -2554,7 +2554,7 @@ async function runBench() {
   btn.style.opacity = '0.4';
   results.innerHTML = '';
 
-  const ITERS = 50;
+  const ITERS = 10;
   const SIZES = [
     { label: '10 KB',  bytes: 10_000,  type: 'text'   },
     { label: '50 KB',  bytes: 50_000,  type: 'mixed'  },
