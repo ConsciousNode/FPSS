@@ -3,10 +3,22 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FPSS — Fixed Point Storage System</title>
+<title>FPSS v0.9 — Fixed Point Storage System</title>
 <!--
-  FPSS — Fixed Point Storage System v0.7
-  ConsciousNode SoftWorks · 2026-05-28
+  FPSS v0.9 — Fixed Point Storage System
+  ConsciousNode SoftWorks · 2026-05-30
+
+  v0.9 — Path-based addressing + CNS header upgrade:
+    Path prefix input above drop zone → stored as `path` on each file
+    Sidebar folder tree — files grouped by path, collapsible, root files flat
+    Query results and Browse detail show file path
+    CNS header: version → '0.9', SHA-256 checksum replaces DJB2 parity
+    CNS header: MV AutopoieticOptimizer schema field (folders, entry_paths, addressing)
+    buildPayload() and restorePayload() now async
+    restorePayload: SHA-256 verify (v0.9+) with DJB2 fallback (legacy)
+    path field persisted in entries, restored on import
+    Named in honor of Maturana and Varela
+    Built by Ed Interim · Kehai Interim (power merge)
 
   v0.7 — WASMKernel acceleration:
     ROSA-ANS codec now runs in WebAssembly via WASMKernal (ConsciousNode SoftWorks)
@@ -80,7 +92,7 @@
     SpikeVox v2: Kehai Interim / Phase 2 (ported from Simulacra)
     ElasticTok v2: Kehai Interim / Phase 3 (spatial variant for static images)
     WASMKernal: ConsciousNode SoftWorks (embedded)
-    FPSS v0.7: Kham Kizer · Ed Interim · 2026-05-28
+    FPSS v0.8: Kham Kizer · Ed Interim · 2026-05-28
 -->
 <style>
 :root{
@@ -150,6 +162,17 @@ aside{
 .drop-zone:hover,.drop-zone.over{border-color:var(--amber);background:var(--aglow);}
 .dz-icon{font-size:16px;margin-bottom:2px;opacity:.45;}
 .dz-text{font-size:10px;color:var(--muted);line-height:1.5;}
+.path-prefix-row{display:flex;align-items:center;gap:6px;padding:5px 8px 0;}
+.pp-label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;white-space:nowrap;}
+.pp-input{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:5px 8px;font-size:10px;font-family:var(--mono);color:var(--text);outline:none;}
+.pp-input:focus{border-color:var(--amber);}
+.folder-group{margin-bottom:2px;}
+.folder-hd{display:flex;align-items:center;gap:5px;padding:4px 8px;cursor:pointer;font-family:var(--mono);font-size:10px;color:var(--teal);letter-spacing:.05em;user-select:none;}
+.folder-hd:hover{color:var(--amber);}
+.folder-arrow{font-size:8px;transition:transform .15s;display:inline-block;}
+.folder-hd.open .folder-arrow{transform:rotate(90deg);}
+.folder-children{padding-left:10px;border-left:1px solid var(--border);margin-left:14px;}
+.folder-children.hidden{display:none;}
 
 /* ── Main content ────────────────────────────────────────── */
 main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
@@ -266,7 +289,7 @@ input.mi:focus{border-color:var(--amber);}
 <div id="app">
   <header>
     <button id="sidebar-toggle" onclick="toggleSidebar()" title="Files">☰</button>
-    <div><div class="logo">FPSS</div><div class="logo-sub">Fixed Point Storage System · ConsciousNode SoftWorks · v0.5</div></div>
+    <div><div class="logo">FPSS</div><div class="logo-sub">Fixed Point Storage System · ConsciousNode SoftWorks · v0.9</div></div>
     <div class="h1-pill" id="h1-pill"><div class="h1-dot"></div><span id="h1-txt">H¹(ℱ) = 0.000</span></div>
   </header>
   <div id="sidebar-backdrop" onclick="closeSidebar()"></div>
@@ -274,9 +297,13 @@ input.mi:focus{border-color:var(--amber);}
     <aside id="sidebar">
       <div class="aside-head">Archive</div>
       <div class="file-list" id="file-list"><div class="fl-empty">No files ingested yet.</div></div>
+      <div class="path-prefix-row">
+        <span class="pp-label">path</span>
+        <input class="pp-input" id="pp" type="text" placeholder="e.g. documents/invoices" title="Path prefix for ingested files">
+      </div>
       <div class="drop-zone" id="dz">
         <div class="dz-icon">⊕</div>
-        <div class="dz-text">Drop or click · all file types<br>text · image · audio · weights routed</div>
+        <div class="dz-text">Drop or click · all file types<br>text · image · audio · weights · pdf routed</div>
         <input id="fi" type="file" multiple style="display:none">
       </div>
     </aside>
@@ -305,7 +332,10 @@ input.mi:focus{border-color:var(--amber);}
           <div class="blist" id="bl"></div>
           <div class="bdetail">
             <div class="dhead" id="dh" style="display:none">
-              <span class="dname" id="d-name"></span>
+              <div style="flex:1;min-width:0;">
+                <span class="dname" id="d-name"></span>
+                <div id="d-path" style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;"></div>
+              </div>
               <button class="btn btn-t" onclick="extractSel()">↓ Extract</button>
             </div>
             <div class="dscroll" id="d-scroll"><div class="empty-msg">Select a file.</div></div>
@@ -326,9 +356,10 @@ input.mi:focus{border-color:var(--amber);}
             <tr><th>Type</th><th>Route</th><th>Status</th></tr>
             <tr><td class="rt-type">text · code · log</td><td>ROSA-ANS byte compression</td><td class="rt-active">✓ v0.7</td></tr>
             <tr><td class="rt-type">JSON · CSV · YAML</td><td>ROSA-ANS byte compression</td><td class="rt-active">✓ v0.7</td></tr>
-            <tr><td class="rt-type">image/*</td><td>ElasticTok spatial patches → ternary-b1.58</td><td class="rt-active">✓ active v0.5</td></tr>
-            <tr><td class="rt-type">audio/*</td><td>SpikeVox LIF → spike features → ternary-b1.58</td><td class="rt-active">✓ active v0.5</td></tr>
-            <tr><td class="rt-type">neural weights</td><td>Float32 sampling → BitNet b1.58 ternary</td><td class="rt-active">✓ active v0.5</td></tr>
+            <tr><td class="rt-type">image/*</td><td>ElasticTok spatial patches → ternary-b1.58</td><td class="rt-active">✓ v0.5</td></tr>
+            <tr><td class="rt-type">audio/*</td><td>SpikeVox LIF → spike features → ternary-b1.58</td><td class="rt-active">✓ v0.5</td></tr>
+            <tr><td class="rt-type">neural weights</td><td>Float32 sampling → BitNet b1.58 ternary</td><td class="rt-active">✓ v0.5</td></tr>
+            <tr><td class="rt-type">PDF</td><td>PDF.js text extract → ROSA-ANS + chunked fp</td><td class="rt-active">✓ v0.8</td></tr>
             <tr><td class="rt-type">binary · unknown</td><td>Passthrough (1:1)</td><td class="rt-pass">→ passthrough</td></tr>
           </table>
           <div class="sec-lbl" style="margin-top:16px;">Ingested Files by Route</div>
@@ -1522,12 +1553,13 @@ async function fingerprintWeights(file){
    Type-aware routing  §8.1
    ═══════════════════════════════════════════════════════════ */
 const ROUTE_TEXT='text',ROUTE_JSON='json',ROUTE_BINARY='binary';
-const ROUTE_IMAGE='image',ROUTE_AUDIO='audio',ROUTE_WEIGHTS='weights';
+const ROUTE_IMAGE='image',ROUTE_AUDIO='audio',ROUTE_WEIGHTS='weights',ROUTE_PDF='pdf';
 
 function detectRoute(filename,mimeType){
   const ext=filename.split('.').pop().toLowerCase();
   if(mimeType.startsWith('image/'))return ROUTE_IMAGE;
   if(mimeType.startsWith('audio/'))return ROUTE_AUDIO;
+  if(ext==='pdf'||mimeType==='application/pdf')return ROUTE_PDF;
   if(['bin','pt','pth','safetensors','gguf','ggml','ckpt','pkl'].includes(ext))return ROUTE_WEIGHTS;
   if(['json','jsonl'].includes(ext)||mimeType==='application/json')return ROUTE_JSON;
   const textExts=['txt','md','markdown','js','ts','jsx','tsx','py','rs','c','cpp','h','hpp','java','go','rb','php','sh','bash','zsh','css','scss','less','html','htm','xml','svg','yaml','yml','toml','ini','cfg','conf','log','csv','tsv','sql'];
@@ -1566,19 +1598,21 @@ async function handleFiles(files){
   if(ingesting)return;ingesting=true;
   const arr=Array.from(files).filter(f=>f.size<12*1024*1024);
   const pg=document.getElementById('pg');
-  for(let i=0;i<arr.length;i++){pg.style.width=((i/arr.length)*100)+'%';await ingest(arr[i]);await new Promise(r=>setTimeout(r,0));}
+  const prefix=(document.getElementById('pp').value||'').trim().replace(/\/+$/,'');
+  for(let i=0;i<arr.length;i++){pg.style.width=((i/arr.length)*100)+'%';await ingest(arr[i],prefix);await new Promise(r=>setTimeout(r,0));}
   pg.style.width='100%';setTimeout(()=>pg.style.width='0%',700);
   ingesting=false;
 }
 
-async function ingest(file){
+async function ingest(file,prefix=''){
   const route=detectRoute(file.name,file.type||'');
   const fid=uid(),ts=new Date().toISOString();
+  const filePath=prefix?prefix+'/'+file.name:file.name;
 
   /* ── Image ─────────────────────────────────────────────── */
   if(route===ROUTE_IMAGE){
     const imgData=await fingerprintImage(file);
-    if(!imgData)return ingestPassthrough(file,fid,route,ts);
+    if(!imgData)return ingestPassthrough(file,fid,route,ts,filePath);
     const{packed,thumbnail,gridW,gridH,W,H}=imgData;
     const buf=await file.arrayBuffer();
     const rawBytes=new Uint8Array(buf);
@@ -1587,7 +1621,7 @@ async function ingest(file){
     const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     A.sheaf.add('image',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
     A.files.push({
-      id:fid,filename:file.name,size:file.size,type:file.type||'image/unknown',
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'image/unknown',
       ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
       chunks:[`[image: ${W}×${H} · ${gridW*gridH} patches · ElasticTok spatial]`],
       packedFps:[Array.from(packed)],
@@ -1601,7 +1635,7 @@ async function ingest(file){
   /* ── Audio ─────────────────────────────────────────────── */
   if(route===ROUTE_AUDIO){
     const audData=await fingerprintAudio(file);
-    if(!audData)return ingestPassthrough(file,fid,route,ts);
+    if(!audData)return ingestPassthrough(file,fid,route,ts,filePath);
     const{packed,duration,sampleRate,totalSpikes}=audData;
     const buf=await file.arrayBuffer();
     const rawBytes=new Uint8Array(buf);
@@ -1610,7 +1644,7 @@ async function ingest(file){
     const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     A.sheaf.add('audio',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
     A.files.push({
-      id:fid,filename:file.name,size:file.size,type:file.type||'audio/unknown',
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'audio/unknown',
       ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
       chunks:[`[audio: ${duration.toFixed(2)}s @ ${sampleRate}Hz · ${totalSpikes} spikes · SpikeVox LIF]`],
       packedFps:[Array.from(packed)],
@@ -1624,7 +1658,7 @@ async function ingest(file){
   /* ── Neural weights ─────────────────────────────────────── */
   if(route===ROUTE_WEIGHTS){
     const wData=await fingerprintWeights(file);
-    if(!wData)return ingestPassthrough(file,fid,route,ts);
+    if(!wData)return ingestPassthrough(file,fid,route,ts,filePath);
     const{packed,numParams,ternaryBytes,float32Bytes,ratio}=wData;
     const buf=await file.arrayBuffer();
     const rawBytes=new Uint8Array(buf);
@@ -1633,7 +1667,7 @@ async function ingest(file){
     const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
     A.sheaf.add('weights',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
     A.files.push({
-      id:fid,filename:file.name,size:file.size,type:file.type||'application/octet-stream',
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'application/octet-stream',
       ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
       chunks:[`[weights: ${numParams.toLocaleString()} params · b1.58 ${ratio} · ROSA-ANS ${compRatio}]`],
       packedFps:[Array.from(packed)],
@@ -1660,7 +1694,7 @@ async function ingest(file){
       if(i%4===0)await new Promise(r=>setTimeout(r,0));
     }
     A.files.push({
-      id:fid,filename:file.name,size:file.size,type:file.type||'text/plain',
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'text/plain',
       ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
       chunks,packedFps,
       origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
@@ -1669,15 +1703,67 @@ async function ingest(file){
     A.sealedAt=null;A.parity=null;refresh();return;
   }
 
-  /* ── Passthrough (truly unstructured binary) ──────────────── */
-  await ingestPassthrough(file,fid,route,ts);
+  /* ── PDF — PDF.js text extraction → ROSA-ANS + chunked fingerprinting ── */
+  if(route===ROUTE_PDF){
+    try{
+      if(!window._pdfjs){
+        await new Promise((res,rej)=>{
+          const s=document.createElement('script');
+          s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.mjs';
+          s.type='module';
+          s.onload=res;s.onerror=rej;
+          // fallback: use importShim via dynamic import
+          document.head.appendChild(s);
+        }).catch(()=>{});
+        // Use dynamic import for PDF.js as ESM
+        if(!window._pdfjs){
+          const mod=await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.mjs');
+          window._pdfjs=mod;
+          mod.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.worker.min.mjs';
+        }
+      }
+      const buf=await file.arrayBuffer();
+      const rawBytes=new Uint8Array(buf);
+      const pdf=await window._pdfjs.getDocument({data:rawBytes}).promise;
+      const pageTexts=[];
+      for(let p=1;p<=pdf.numPages;p++){
+        const page=await pdf.getPage(p);
+        const tc=await page.getTextContent();
+        pageTexts.push(tc.items.map(i=>i.str).join(' '));
+      }
+      const text=pageTexts.join('\n\n');
+      const enc=new TextEncoder().encode(text);
+      const cmp=await rosaANSCompress(enc);
+      const stored=bytesToBase64(cmp||enc);
+      const compRatio=cmp?(enc.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
+      const chunks=mkChunks(text);const packedFps=[];
+      for(let i=0;i<chunks.length;i++){
+        const fp=computeFP(chunks[i]);
+        const packed=ternaryPack(fp);
+        packedFps.push(Array.from(packed));
+        A.sheaf.add('text',ternaryUnpack(packed),{fid,ci:i,fn:file.name});
+        if(i%4===0)await new Promise(r=>setTimeout(r,0));
+      }
+      A.files.push({
+        id:fid,filename:file.name,path:filePath,size:file.size,type:'application/pdf',
+        ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+        chunks,packedFps,pageCount:pdf.numPages,
+        origSize:enc.length,compSize:(cmp||enc).length,compressionRatio:compRatio
+      });
+      A.totalSize+=file.size;A.totalChunks+=chunks.length;A.routedCount++;
+      A.sealedAt=null;A.parity=null;refresh();return;
+    }catch(e){console.warn('PDF.js failed, passthrough:',e);}
+    return ingestPassthrough(file,fid,route,ts,filePath);
+  }
+
+
 }
 
-async function ingestPassthrough(file,fid,route,ts){
+async function ingestPassthrough(file,fid,route,ts,path){
   const buf=await file.arrayBuffer();
   const stored=bytesToBase64(new Uint8Array(buf));
   A.files.push({
-    id:fid,filename:file.name,size:file.size,
+    id:fid,filename:file.name,path:filePath,size:file.size,
     type:file.type||'application/octet-stream',ts,route,
     passthrough:true,stored,fullText:'',chunks:[],packedFps:[]
   });
@@ -1738,40 +1824,58 @@ function buildContents(){
   return counts;
 }
 
-function buildPayload(name){
+async function sha256hex(str){
+  const buf=await crypto.subtle.digest('SHA-256',new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+async function buildPayload(name){
+  // Build schema: unique paths → folder structure summary
+  const paths=[...new Set(A.files.map(f=>f.path||f.filename))];
+  const folders=[...new Set(paths.map(p=>{const s=p.split('/');return s.length>1?s.slice(0,-1).join('/'):'/'}))];
+  const schema={addressing:'path+semantic',folders,entry_paths:paths};
   const p={
     cns_header:{
-      version:'0.5',created:new Date().toISOString(),sealed:new Date().toISOString(),
-      name:name||'archive',generator:'ConsciousNode SoftWorks · FPSS v0.5',
+      version:'0.9',created:new Date().toISOString(),sealed:new Date().toISOString(),
+      name:name||'archive',generator:'ConsciousNode SoftWorks · FPSS v0.9',
       stack:'ROSA/SheafMemory/BitNet-b1.58/OOMB/ElasticTok/SpikeVox',
       fps_encoding:'ternary-b1.58',
       entry_count:A.files.length,total_chunks:A.totalChunks,
-      contents:buildContents(),keyed:false
+      contents:buildContents(),schema,keyed:false
     },
     entries:A.files.map(f=>({
-      id:f.id,filename:f.filename,size:f.size,type:f.type,ts:f.ts,
+      id:f.id,filename:f.filename,path:f.path||f.filename,size:f.size,type:f.type,ts:f.ts,
       route:f.route,passthrough:f.passthrough,
       stored:f.stored,fullText:f.fullText,
       chunks:f.chunks,packedFps:f.packedFps,
-      // v0.5 extended fields
       thumbnail:f.thumbnail||null,
       imageW:f.imageW||0,imageH:f.imageH||0,gridW:f.gridW||0,gridH:f.gridH||0,
       duration:f.duration||0,sampleRate:f.sampleRate||0,totalSpikes:f.totalSpikes||0,
       numParams:f.numParams||0,ternaryBytes:f.ternaryBytes||0,
-      float32Bytes:f.float32Bytes||0,compressionRatio:f.compressionRatio||'—'
+      float32Bytes:f.float32Bytes||0,compressionRatio:f.compressionRatio||'—',
+      pageCount:f.pageCount||0
     })),
     sheaf_state:A.sheaf.export()
   };
-  const json=JSON.stringify(p);
-  p.cns_header.parity=djb2(json);
+  // SHA-256 checksum over payload content (without checksum field)
+  p.cns_header.checksum=await sha256hex(JSON.stringify(p));
   return p;
 }
 
-function restorePayload(data){
-  const{parity,...hrest}=data.cns_header;
-  const ok=!parity||(parity===djb2(JSON.stringify({...data,cns_header:{...hrest}})));
+async function restorePayload(data){
+  // Verify SHA-256 checksum (v0.9+) or fall back to DJB2 parity (legacy)
+  let ok=true;
+  if(data.cns_header?.checksum){
+    const{checksum,...rest}=data.cns_header;
+    const testPayload={...data,cns_header:{...rest}};
+    const computed=await sha256hex(JSON.stringify(testPayload));
+    ok=(computed===checksum);
+  } else if(data.cns_header?.parity){
+    const{parity,...hrest}=data.cns_header;
+    ok=(parity===djb2(JSON.stringify({...data,cns_header:{...hrest}})));
+  }
   A.files=data.entries.map(e=>({
-    id:e.id,filename:e.filename,size:e.size,type:e.type,ts:e.ts,
+    id:e.id,filename:e.filename,path:e.path||'/',size:e.size,type:e.type,ts:e.ts,
     route:e.route||ROUTE_TEXT,passthrough:!!e.passthrough,
     stored:e.stored||'',fullText:e.fullText||'',
     chunks:e.chunks||[],packedFps:e.packedFps||[],
@@ -1779,7 +1883,8 @@ function restorePayload(data){
     imageW:e.imageW||0,imageH:e.imageH||0,gridW:e.gridW||0,gridH:e.gridH||0,
     duration:e.duration||0,sampleRate:e.sampleRate||0,totalSpikes:e.totalSpikes||0,
     numParams:e.numParams||0,ternaryBytes:e.ternaryBytes||0,
-    float32Bytes:e.float32Bytes||0,compressionRatio:e.compressionRatio||'—'
+    float32Bytes:e.float32Bytes||0,compressionRatio:e.compressionRatio||'—',
+    pageCount:e.pageCount||0
   }));
   A.sheaf=new SheafMemory(VOCAB);
   if(data.sheaf_state){
@@ -1851,7 +1956,9 @@ input.qi:focus{border-color:#4ab8c8;}input.qi::placeholder{color:#7a7498;}
 .rb-image{color:#fbbf24;border-color:#6a5020;background:rgba(251,191,36,.06);}
 .rb-audio{color:#fbbf24;border-color:#6a5020;background:rgba(251,191,36,.06);}
 .rb-weights{color:#a78bfa;border-color:#4a3a7a;background:rgba(167,139,250,.06);}
+.rb-pdf{color:#f87171;border-color:#7a2828;background:rgba(248,113,113,.06);}
 .rb-binary{color:#7a7498;border-color:#3a3560;background:transparent;}
+
 .bwrap{display:flex;flex:1;overflow:hidden;}
 .blist{width:200px;flex-shrink:0;border-right:1px solid #2a2640;overflow-y:auto;}
 .blist::-webkit-scrollbar{width:4px;}.blist::-webkit-scrollbar-thumb{background:#2a2640;border-radius:4px;}
@@ -1965,14 +2072,14 @@ function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;co
 function computeFP(text){const t=text.slice(0,1024),toks=[];for(let i=0;i<t.length;i++)toks.push(Math.min(127,t.charCodeAt(i)));if(toks.length<2)return new Float32Array(128);const preds=ROSA(toks),hist=new Float32Array(128);for(const p of preds)if(p>=0&&p<128)hist[p]++;for(const tok of toks)hist[tok]+=.1;let norm=0;for(let i=0;i<128;i++)norm+=hist[i]**2;norm=Math.sqrt(norm)+1e-8;for(let i=0;i<128;i++)hist[i]/=norm;return hist;}
 function ternaryUnpack(packed){const fp=new Float32Array(128);for(let i=0;i<32;i++){const byte=packed[i];for(let j=0;j<4;j++){const q=(byte>>((3-j)*2))&0b11;fp[i*4+j]=q===0b00?-1:q===0b10?1:0;}}let norm=0;for(let i=0;i<128;i++)norm+=fp[i]**2;norm=Math.sqrt(norm)+1e-8;for(let i=0;i<128;i++)fp[i]/=norm;return fp;}
 /* ROSA-ANS Decoder (seed reader copy) */
-function _deserializeFreq(buf){const freq=new Uint32Array(256);for(let i=0;i<256;i++){freq[i]=(buf[i*2]<<8)|buf[i*2+1];if(freq[i]<1)freq[i]=1;}return freq;}
+function _deserializeFreq(buf){const freq=new Uint32Array(256);for(let i=0;i<256;i++){freq[i]=buf[i]||1;}return freq;}
 function _buildCumFreq(freq){const cum=new Uint32Array(257);let total=0;for(let i=0;i<256;i++)total+=freq[i];let s=0;for(let i=0;i<256;i++){cum[i]=s;s+=freq[i];}cum[256]=total;return{cum,total};}
 function rosaANSDecompress(compressed){
   if(compressed.length===0)return new Uint8Array(0);
   if(compressed[0]!==0xC5||compressed[1]!==0x17)return compressed;// not compressed, return as-is
   const origLen=(compressed[2]<<24)|(compressed[3]<<16)|(compressed[4]<<8)|compressed[5];
-  const freqBuf=compressed.slice(6,518);
-  const stream=compressed.slice(518);
+  const freqBuf=compressed.slice(6,262);
+  const stream=compressed.slice(262);
   const freq=_deserializeFreq(freqBuf);
   const{cum,total}=_buildCumFreq(freq);
   const L=1<<23;
@@ -2202,7 +2309,7 @@ async function doExp(){
   const name=document.getElementById('exp-name').value||'archive';
   const pw=document.getElementById('exp-key').value;
   closeAll();
-  const payload=buildPayload(name);
+  const payload=await buildPayload(name);
   A.sealedAt=payload.cns_header.sealed;A.parity='ok';
   updateSealBadge();
   if(pw){
@@ -2210,7 +2317,7 @@ async function doExp(){
     const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
     const key=await deriveKey(pw,salt);
     const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(json));
-    const wrap={cns_header:{version:'0.7',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.7'},
+    const wrap={cns_header:{version:'0.9',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.9'},
       salt:Array.from(salt),iv:Array.from(iv),payload:Array.from(new Uint8Array(cipher))};
     dl(buildSeedReader(wrap,name),name+'.keyed.cns','application/octet-stream');
   }else{
@@ -2235,11 +2342,11 @@ async function importCNS(text,pw){
   if(data.cns_header?.keyed){
     if(!pw){alert('This archive is keyed. Enter the passphrase.');return;}
     const key=await deriveKey(pw,new Uint8Array(data.salt));
-    try{const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(data.iv)},key,new Uint8Array(data.payload));restorePayload(JSON.parse(new TextDecoder().decode(plain)));}
+    try{const plain=await crypto.subtle.decrypt({name:'AES-GCM',iv:new Uint8Array(data.iv)},key,new Uint8Array(data.payload));await restorePayload(JSON.parse(new TextDecoder().decode(plain)));}
     catch{alert('Decryption failed.');}
     return;
   }
-  restorePayload(data);
+  await restorePayload(data);
 }
 
 function dl(text,name,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([text],{type}));a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);}
@@ -2259,13 +2366,13 @@ function doQ(){
   const hits=A.sheaf.topK(qfp,10).map(({c,d})=>{
     const{fid,ci,fn}=c.meta;
     const f=A.files.find(x=>x.id===fid);if(!f)return null;
-    return{fid,fn,route:f.route,chunk:f.chunks[ci]||'',
+    return{fid,fn,path:f.path||f.filename,route:f.route,chunk:f.chunks[ci]||'',
       score:Math.max(0,1-d/4).toFixed(3),pr:c.r.toFixed(3),
       thumbnail:f.thumbnail||null};
   }).filter(Boolean);
   const passFiles=A.files.filter(f=>f.passthrough);
   if(!hits.length&&!passFiles.length){el.innerHTML='<div class="empty-msg">No results.</div>';return;}
-  const routeClass={text:'rb-text',json:'rb-json',image:'rb-image',audio:'rb-audio',weights:'rb-weights',binary:'rb-binary'};
+  const routeClass={text:'rb-text',json:'rb-json',image:'rb-image',audio:'rb-audio',weights:'rb-weights',pdf:'rb-pdf',binary:'rb-binary'};
   el.innerHTML=(hits.length?'<div class="sec-lbl">'+hits.length+' matches retrieved</div>':'')
     +hits.map(h=>{
       const rb=`<span class="route-badge ${routeClass[h.route]||'rb-binary'}">${esc(h.route)}</span>`;
@@ -2273,7 +2380,7 @@ function doQ(){
       const body=h.route==='image'
         ?`${thumb}<div class="r-text" style="font-size:10px;opacity:.6">${esc(h.chunk)}</div>`
         :`<div class="r-text">${esc(h.chunk)}</div>`;
-      return`<div class="r-card"><div class="r-head">${rb}<span class="r-file">${esc(h.fn)}</span><button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extractFile('${h.fid}')">↓ extract</button><span class="r-score">score ${h.score}</span></div>${body}<div class="r-pr">Poincaré r = ${h.pr} · ${+h.pr<.4?'core':+h.pr>.7?'edge':'boundary'}</div></div>`;
+      return`<div class="r-card"><div class="r-head">${rb}<span class="r-file" title="${esc(h.path||h.fn)}">${esc(h.fn)}</span><button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extractFile('${h.fid}')">↓ extract</button><span class="r-score">score ${h.score}</span></div>${body}<div class="r-pr">Poincaré r = ${h.pr} · ${+h.pr<.4?'core':+h.pr>.7?'edge':'boundary'}</div></div>`;
     }).join('')
     +(passFiles.length?`<div style="margin-top:10px;font-size:10px;color:var(--muted);padding:8px 0;border-top:1px solid var(--border)">${passFiles.length} passthrough file(s) not indexed — use Browse tab to extract.</div>`:'');
   refresh();
@@ -2282,15 +2389,48 @@ function doQ(){
 function renderFlist(){
   const el=document.getElementById('file-list');
   if(!A.files.length){el.innerHTML='<div class="fl-empty">No files ingested yet.</div>';return;}
-  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio',weights:'rb-weights'};
-  el.innerHTML=A.files.map(f=>{
-    const meta=f.passthrough?'passthrough':
-      f.route==='image'?`${f.imageW}×${f.imageH}`:
-      f.route==='audio'?`${(f.duration||0).toFixed(1)}s`:
-      f.route==='weights'?`${(f.numParams||0).toLocaleString()}p`:
-      `${f.chunks.length} chunks`;
-    return`<div class="fi${f.id===selId?' sel':''}" onclick="selFile('${f.id}')"><div class="fi-info"><div class="fn">${esc(f.filename)}</div><div class="fm">${esc(meta)} · ${fmtSz(f.size)}</div></div><span class="route-badge ${routeClass[f.route]||'rb-binary'}">${f.route}</span><button class="icon-btn dl" onclick="event.stopPropagation();extractFile('${f.id}')" title="Extract">↓</button><button class="icon-btn rm" onclick="event.stopPropagation();deleteFile('${f.id}')" title="Remove">✕</button></div>`;
-  }).join('');
+  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio',weights:'rb-weights',pdf:'rb-pdf'};
+  // Build folder tree from paths
+  const tree={}; // { 'folder/path': [file,...], ...}, '' = root
+  for(const f of A.files){
+    const parts=(f.path||f.filename).split('/');
+    const folder=parts.length>1?parts.slice(0,-1).join('/'):'';
+    if(!tree[folder])tree[folder]=[];
+    tree[folder].push(f);
+  }
+  const hasFolders=Object.keys(tree).some(k=>k!=='');
+  if(!hasFolders){
+    // flat list (no paths set)
+    el.innerHTML=A.files.map(f=>{
+      const meta=f.passthrough?'passthrough':f.route==='image'?`${f.imageW}×${f.imageH}`:f.route==='audio'?`${(f.duration||0).toFixed(1)}s`:f.route==='weights'?`${(f.numParams||0).toLocaleString()}p`:f.route==='pdf'?`${f.pageCount||'?'} pages`:`${f.chunks.length} chunks`;
+      return`<div class="fi${f.id===selId?' sel':''}" onclick="selFile('${f.id}')"><div class="fi-info"><div class="fn">${esc(f.filename)}</div><div class="fm">${esc(meta)} · ${fmtSz(f.size)}</div></div><span class="route-badge ${routeClass[f.route]||'rb-binary'}">${f.route}</span><button class="icon-btn dl" onclick="event.stopPropagation();extractFile('${f.id}')" title="Extract">↓</button><button class="icon-btn rm" onclick="event.stopPropagation();deleteFile('${f.id}')" title="Remove">✕</button></div>`;
+    }).join('');
+    return;
+  }
+  // Folder tree view
+  function renderFile(f){
+    const meta=f.passthrough?'passthrough':f.route==='image'?`${f.imageW}×${f.imageH}`:f.route==='audio'?`${(f.duration||0).toFixed(1)}s`:f.route==='weights'?`${(f.numParams||0).toLocaleString()}p`:f.route==='pdf'?`${f.pageCount||'?'} pages`:`${f.chunks.length} chunks`;
+    const fname=f.filename;
+    return`<div class="fi${f.id===selId?' sel':''}" onclick="selFile('${f.id}')"><div class="fi-info"><div class="fn">${esc(fname)}</div><div class="fm">${esc(meta)} · ${fmtSz(f.size)}</div></div><span class="route-badge ${routeClass[f.route]||'rb-binary'}">${f.route}</span><button class="icon-btn dl" onclick="event.stopPropagation();extractFile('${f.id}')" title="Extract">↓</button><button class="icon-btn rm" onclick="event.stopPropagation();deleteFile('${f.id}')" title="Remove">✕</button></div>`;
+  }
+  const folderId=k=>'fg-'+btoa(k).replace(/=/g,'');
+  let html='';
+  const sorted=Object.keys(tree).sort();
+  for(const folder of sorted){
+    const files=tree[folder];
+    if(!folder){html+=files.map(renderFile).join('');continue;}
+    const fid2=folderId(folder);
+    html+=`<div class="folder-group"><div class="folder-hd open" id="fh-${fid2}" onclick="toggleFolder('${fid2}')"><span class="folder-arrow">▶</span>📁 ${esc(folder)} <span style="color:var(--muted);font-size:9px">(${files.length})</span></div><div class="folder-children" id="fc-${fid2}">${files.map(renderFile).join('')}</div></div>`;
+  }
+  el.innerHTML=html;
+}
+
+function toggleFolder(fid2){
+  const hd=document.getElementById('fh-'+fid2);
+  const ch=document.getElementById('fc-'+fid2);
+  if(!hd||!ch)return;
+  const open=hd.classList.toggle('open');
+  ch.classList.toggle('hidden',!open);
 }
 
 function selFile(id){
@@ -2299,6 +2439,8 @@ function selFile(id){
   if(!f){document.getElementById('dh').style.display='none';return;}
   document.getElementById('dh').style.display='flex';
   document.getElementById('d-name').textContent=f.filename;
+  const pathEl=document.getElementById('d-path');
+  if(pathEl)pathEl.textContent=f.path||f.filename;
   const el=document.getElementById('d-scroll');
   if(f.passthrough){
     el.innerHTML=`<div class="passthrough-note">⊙ Passthrough · route: <strong>${esc(f.route)}</strong><br>Stored at 1:1 ratio. Use Extract to download the original file.</div>`;
@@ -2355,7 +2497,7 @@ function renderRouting(){
   for(const f of A.files)byRoute[f.route]=(byRoute[f.route]||[]).concat(f);
   const el=document.getElementById('route-breakdown');
   if(!A.files.length){el.innerHTML='<div style="font-size:11px;color:var(--muted);">No files ingested.</div>';return;}
-  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio',weights:'rb-weights'};
+  const routeClass={text:'rb-text',json:'rb-json',binary:'rb-binary',image:'rb-image',audio:'rb-audio',weights:'rb-weights',pdf:'rb-pdf'};
   el.innerHTML=Object.entries(byRoute).map(([route,files])=>{
     return`<div style="display:flex;align-items:center;gap:10px;padding:7px 0;border-bottom:1px solid var(--border);font-size:11px;"><span class="route-badge ${routeClass[route]||'rb-binary'}">${route}</span><span style="color:var(--text)">${files.length} file${files.length>1?'s':''}</span><span style="color:var(--muted);margin-left:auto;font-family:var(--mono);font-size:10px;">${files.map(f=>f.filename).join(', ').slice(0,60)}${files.map(f=>f.filename).join(', ').length>60?'…':''}</span></div>`;
   }).join('');

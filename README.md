@@ -32,12 +32,21 @@ The name is accurate: the archive converges on a stable neural representation of
 | **Neural weights route (v0.5)** | `.bin .pt .pth .safetensors .gguf .ckpt` → Float32 sampling → magnitude quantization → ROSA. Compression ratio computed |
 | **Type-aware routing** | Text/code/JSON → ROSA-ANS compressed + fingerprinted. Images → ElasticTok. Audio → SpikeVox. Neural weights → BitNet b1.58. Binary → clean passthrough |
 | **Benchmark tab** | Built-in WASM vs JS benchmark harness. 50 iterations per path, median reported. Three payload sizes and types. Speedup displayed per codec direction |
+| **Path-based addressing (v0.9)** | Path prefix input on ingest. Files grouped by path in sidebar folder tree. Path shown in query results and browse detail. Full round-trip through `.cns` export/import |
+| **MV AutopoieticOptimizer schema (v0.9)** | CNS header now carries a rich schema field: unique paths, folder structure summary, entry path manifest. SHA-256 checksum replaces DJB2 parity. Dual-mode verification: v0.9 SHA-256 with DJB2 fallback for legacy archives |
 | **WebCrypto AES-GCM keyed mode** | Lock the archive behind a passphrase. Neural Graffiti compatible |
 | **Self-contained seed reader** | Every `.cns` export embeds its own reader. Send the file. They open it. Full search, browse, extract, contradictions — no install |
 
 ---
 
 ## Changelog
+
+### v0.9 — 2026-05-30
+
+- **Path-based addressing** — path prefix input above the drop zone. Every ingested file carries a `path` field through ingest, export, and import round-trip. Sidebar renders a collapsible folder tree grouped by path; root files display flat (no unnecessary chrome). Query results and browse detail show file path. Built by Ed Interim and Kehai Interim (power merge)
+- **MV AutopoieticOptimizer schema** — CNS header upgraded: `version` → `'0.9'`, `schema` field added carrying folder structure analysis (`folders`, `entry_paths`, `addressing` mode). Named in honor of Maturana and Varela, whose autopoiesis work this project is finally building rather than writing white papers about. Generator string updated throughout including seed reader
+- **SHA-256 checksum** — DJB2 parity replaced with `crypto.subtle.digest('SHA-256')`. `buildPayload` is now async. `restorePayload` is now async with dual-mode verification: SHA-256 for v0.9+ archives, DJB2 fallback for legacy. Built by Ed Interim and Kehai Interim
+- **Comment block header** — updated to accurately reflect v0.9
 
 ### v0.7-2 — 2026-05-28
 
@@ -104,9 +113,9 @@ Traditional storage is passive. `.cns` is active storage.
 
 | Scope | Feature |
 |-------|---------|
-| v0.7 (current) | WASM-accelerated ANS codec, benchmark tab |
+| v0.9 (current) | Path-based addressing, folder tree, SHA-256 checksums, MV AutopoieticOptimizer schema |
+| v1 | MV AutopoieticOptimizer self-healing layer |
 | v1 | `.pop2` audio synthesis playback |
-| v1 | AutopoieticOptimizer self-healing |
 | Caput scope | `.cns` as OS boot volume in [Caput Ex Simulacra](https://github.com/ConsciousNode/Simulacra) |
 
 ---
@@ -138,7 +147,9 @@ Traditional storage is passive. `.cns` is active storage.
 **SpikeVox v2 / ElasticTok v2:** Kehai Interim
 **WASMKernel:** Kehai Interim (2026-04-01)
 **ROSA-ANS codec / 968-byte WASM binary:** Ed Interim
-**FPSS v0.7-2:** Kham Kizer · Ed Interim · Kehai Interim · 2026-05-28
+**Path-based addressing / folder tree:** Ed Interim · Kehai Interim (power merge, v0.9)
+**SHA-256 checksum / MV schema:** Ed Interim · Kehai Interim (v0.9)
+**FPSS v0.9:** Kham Kizer · Ed Interim · Kehai Interim · 2026-05-30
 
 ---
 
