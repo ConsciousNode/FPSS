@@ -3,22 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FPSS v0.9 — Fixed Point Storage System</title>
+<title>FPSS v0.9.1 — Fixed Point Storage System</title>
 <!--
-  FPSS v0.9 — Fixed Point Storage System
-  ConsciousNode SoftWorks · 2026-05-30
+  FPSS v0.9.1 — Fixed Point Storage System
+  ConsciousNode SoftWorks · 2026-05-28
 
-  v0.9 — Path-based addressing + CNS header upgrade:
-    Path prefix input above drop zone → stored as `path` on each file
-    Sidebar folder tree — files grouped by path, collapsible, root files flat
-    Query results and Browse detail show file path
-    CNS header: version → '0.9', SHA-256 checksum replaces DJB2 parity
-    CNS header: MV AutopoieticOptimizer schema field (folders, entry_paths, addressing)
-    buildPayload() and restorePayload() now async
-    restorePayload: SHA-256 verify (v0.9+) with DJB2 fallback (legacy)
-    path field persisted in entries, restored on import
-    Named in honor of Maturana and Varela
-    Built by Ed Interim · Kehai Interim (power merge)
+  v0.9.1 — Xinu compliance:
+    Removed PDF.js external dependency (cdnjs.cloudflare.com)
+    Native zero-dependency PDF extractor: nativePdfText() + nativePdfPageCount()
+    FlateDecode via DecompressionStream (browser-native deflate-raw)
+    Tj/TJ/BT/ET operator parsing, literal + hex string decode
+    Falls through to passthrough for encrypted/image-only PDFs
+    ConsciousNode SoftWorks · 2026-05-30
 
   v0.7 — WASMKernel acceleration:
     ROSA-ANS codec now runs in WebAssembly via WASMKernal (ConsciousNode SoftWorks)
@@ -1703,35 +1699,152 @@ async function ingest(file,prefix=''){
     A.sealedAt=null;A.parity=null;refresh();return;
   }
 
+
+/* ── nativePdfText — zero-dependency PDF text extraction ─────────────────
+   Handles: FlateDecode content streams, Tj / TJ operators,
+            literal strings (with octal / escape), hex strings.
+   Falls through (returns null) for: encrypted PDFs, image-only,
+   broken streams — caller routes to passthrough in that case.
+   Uses DecompressionStream (deflate-raw) — available in all modern browsers.
+   ConsciousNode SoftWorks · v1.0 · 2026-05-30                            */
+
+function _pdfFindBytes(src,from,pat){
+  outer:for(let i=from;i<=src.length-pat.length;i++){
+    for(let j=0;j<pat.length;j++)if(src[i+j]!==pat[j])continue outer;
+    return i;
+  }
+  return -1;
+}
+
+function _pdfDecodeLit(s){
+  return s
+    .replace(/\\n/g,'\n').replace(/\\r/g,'\r').replace(/\\t/g,'\t')
+    .replace(/\\([0-7]{1,3})/g,(_,o)=>String.fromCharCode(parseInt(o,8)))
+    .replace(/\\(.)/g,'$1');
+}
+
+function _pdfDecodeHex(h){
+  if(h.length%2)h+='0';
+  let s='';
+  for(let i=0;i<h.length;i+=2)s+=String.fromCharCode(parseInt(h.slice(i,i+2),16));
+  return s;
+}
+
+function _pdfParseTJ(arr){
+  const parts=[];
+  const re=/\(([^)\\]*(?:\\.[^)\\]*)*)\)|<([0-9a-fA-F]*)>|(-?\d+(?:\.\d+)?)/g;
+  let m;
+  while((m=re.exec(arr))!==null){
+    if(m[1]!==undefined)parts.push(_pdfDecodeLit(m[1]));
+    else if(m[2]!==undefined)parts.push(_pdfDecodeHex(m[2]));
+    else if(parseFloat(m[3])<-200)parts.push(' ');
+  }
+  return parts.join('');
+}
+
+function _pdfExtractOps(content){
+  const parts=[];
+  const btRe=/BT([\s\S]*?)ET/g;
+  let m;
+  while((m=btRe.exec(content))!==null){
+    const block=m[1];
+    const re=/\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*Tj|<([0-9a-fA-F]*)>\s*Tj|\([\s\S]*?\]\s*TJ/g;
+    // simpler approach: combined Tj/TJ scan
+    const opRe=/\(([^)\\]*(?:\\.[^)\\]*)*)\)\s*Tj|<([0-9a-fA-F]+)>\s*Tj|\[([\s\S]*?)\]\s*TJ/g;
+    let om;
+    while((om=opRe.exec(block))!==null){
+      if(om[1]!==undefined)parts.push(_pdfDecodeLit(om[1]));
+      else if(om[2]!==undefined)parts.push(_pdfDecodeHex(om[2]));
+      else if(om[3]!==undefined)parts.push(_pdfParseTJ(om[3]));
+    }
+    parts.push('\n');
+  }
+  return parts.join('');
+}
+
+async function _pdfInflate(bytes){
+  try{
+    const ds=new DecompressionStream('deflate-raw');
+    const w=ds.writable.getWriter();
+    const r=ds.readable.getReader();
+    w.write(bytes);w.close();
+    const chunks=[];
+    for(;;){const{done,value}=await r.read();if(done)break;chunks.push(value);}
+    const len=chunks.reduce((s,c)=>s+c.length,0);
+    const out=new Uint8Array(len);let off=0;
+    for(const c of chunks){out.set(c,off);off+=c.length;}
+    return out;
+  }catch(e){return null;}
+}
+
+async function nativePdfText(rawBytes){
+  const td=new TextDecoder('latin1');
+  if(rawBytes.length<8)return null;
+  if(td.decode(rawBytes.slice(0,5))!=='%PDF-')return null;
+  // Bail on encrypted PDFs
+  const preview=td.decode(rawBytes.slice(0,Math.min(rawBytes.length,4096)));
+  if(/\/Encrypt\b/.test(preview))return null;
+
+  const STREAM=[115,116,114,101,97,109];   // 'stream'
+  const ENDSTR=[101,110,100,115,116,114,101,97,109]; // 'endstream'
+  const texts=[];
+  let pos=0;
+
+  while(pos<rawBytes.length){
+    const si=_pdfFindBytes(rawBytes,pos,STREAM);
+    if(si<0)break;
+    let ds=si+6;
+    if(rawBytes[ds]===13&&rawBytes[ds+1]===10)ds+=2;
+    else if(rawBytes[ds]===10)ds+=1;
+    else{pos=si+1;continue;}
+
+    const ei=_pdfFindBytes(rawBytes,ds,ENDSTR);
+    if(ei<0)break;
+
+    // Dict text — look back up to 1 KB for context
+    const dictRaw=td.decode(rawBytes.slice(Math.max(0,si-1024),si));
+    if(/\/Subtype\s*\/Image/.test(dictRaw)){pos=ei+9;continue;}
+
+    let de=ei;
+    if(rawBytes[de-1]===10)de--;
+    if(rawBytes[de-1]===13)de--;
+    const streamBytes=rawBytes.slice(ds,de);
+
+    let content;
+    if(/\/Filter\s*\/FlateDecode/.test(dictRaw)||
+       /\/Filter\s*\[[^\]]*\/FlateDecode/.test(dictRaw)){
+      const inflated=await _pdfInflate(streamBytes);
+      if(!inflated){pos=ei+9;continue;}
+      content=td.decode(inflated);
+    }else{
+      content=td.decode(streamBytes);
+    }
+
+    const t=_pdfExtractOps(content);
+    if(t.trim())texts.push(t);
+    pos=ei+9;
+  }
+
+  if(!texts.length)return null;
+  return texts.join('\n\n');
+}
+
+function nativePdfPageCount(rawBytes){
+  // Count /Type /Page entries (excludes /Pages nodes)
+  const td=new TextDecoder('latin1');
+  const src=td.decode(rawBytes);
+  const matches=src.match(/\/Type\s*\/Page[^s]/g);
+  return matches?matches.length:1;
+}
+
   /* ── PDF — PDF.js text extraction → ROSA-ANS + chunked fingerprinting ── */
   if(route===ROUTE_PDF){
     try{
-      if(!window._pdfjs){
-        await new Promise((res,rej)=>{
-          const s=document.createElement('script');
-          s.src='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.mjs';
-          s.type='module';
-          s.onload=res;s.onerror=rej;
-          // fallback: use importShim via dynamic import
-          document.head.appendChild(s);
-        }).catch(()=>{});
-        // Use dynamic import for PDF.js as ESM
-        if(!window._pdfjs){
-          const mod=await import('https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.min.mjs');
-          window._pdfjs=mod;
-          mod.GlobalWorkerOptions.workerSrc='https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.3.136/pdf.worker.min.mjs';
-        }
-      }
       const buf=await file.arrayBuffer();
       const rawBytes=new Uint8Array(buf);
-      const pdf=await window._pdfjs.getDocument({data:rawBytes}).promise;
-      const pageTexts=[];
-      for(let p=1;p<=pdf.numPages;p++){
-        const page=await pdf.getPage(p);
-        const tc=await page.getTextContent();
-        pageTexts.push(tc.items.map(i=>i.str).join(' '));
-      }
-      const text=pageTexts.join('\n\n');
+      const text=await nativePdfText(rawBytes);
+      if(!text)throw new Error('no extractable text');
+      const pageCount=nativePdfPageCount(rawBytes);
       const enc=new TextEncoder().encode(text);
       const cmp=await rosaANSCompress(enc);
       const stored=bytesToBase64(cmp||enc);
@@ -1747,7 +1860,7 @@ async function ingest(file,prefix=''){
       A.files.push({
         id:fid,filename:file.name,path:filePath,size:file.size,type:'application/pdf',
         ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
-        chunks,packedFps,pageCount:pdf.numPages,
+        chunks,packedFps,pageCount,
         origSize:enc.length,compSize:(cmp||enc).length,compressionRatio:compRatio
       });
       A.totalSize+=file.size;A.totalChunks+=chunks.length;A.routedCount++;
