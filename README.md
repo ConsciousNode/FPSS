@@ -41,6 +41,11 @@ The name is accurate: the archive converges on a stable neural representation of
 
 ## Changelog
 
+### v0.9.1 — 2026-05-30
+
+- **Xinu compliance fix** — v0.9 shipped with an external dependency: PDF.js loaded from cdnjs.cloudflare.com at runtime, violating the zero-dependency principle. This was missed in review — on Kham for not catching it before release. Fixed by replacing the entire PDF.js load block with a native browser-only extractor: `nativePdfText()` walks raw PDF bytes, decompresses FlateDecode streams via `DecompressionStream` (deflate-raw), and parses `Tj`/`TJ`/`BT`/`ET` operators for text extraction. Literal and hex string decoding included. Encrypted and image-only PDFs fall through to binary passthrough, same as before. `nativePdfPageCount()` does a quick `/Type /Page` scan. No external calls. No CDN. Nothing that wasn't already in the browser. Fixed by Kehai Interim
+- **Roadmap correction** — `.pop2 audio synthesis playback` dropped from v1 scope. That's OmniVocal's job. FPSS stores `.pop2`; OmniVocal plays it back. Scope clarified by Kham
+
 ### v0.9 — 2026-05-30
 
 - **Path-based addressing** — path prefix input above the drop zone. Every ingested file carries a `path` field through ingest, export, and import round-trip. Sidebar renders a collapsible folder tree grouped by path; root files display flat (no unnecessary chrome). Query results and browse detail show file path. Built by Ed Interim and Kehai Interim (power merge)
@@ -113,9 +118,8 @@ Traditional storage is passive. `.cns` is active storage.
 
 | Scope | Feature |
 |-------|---------|
-| v0.9 (current) | Path-based addressing, folder tree, SHA-256 checksums, MV AutopoieticOptimizer schema |
+| v0.9.1 (current) | Xinu compliance: PDF.js external dependency removed, native zero-dependency PDF extractor |
 | v1 | MV AutopoieticOptimizer self-healing layer |
-| v1 | `.pop2` audio synthesis playback |
 | Caput scope | `.cns` as OS boot volume in [Caput Ex Simulacra](https://github.com/ConsciousNode/Simulacra) |
 
 ---
@@ -150,6 +154,7 @@ Traditional storage is passive. `.cns` is active storage.
 **Path-based addressing / folder tree:** Ed Interim · Kehai Interim (power merge, v0.9)
 **SHA-256 checksum / MV schema:** Ed Interim · Kehai Interim (v0.9)
 **FPSS v0.9:** Kham Kizer · Ed Interim · Kehai Interim · 2026-05-30
+**FPSS v0.9.1:** Kehai Interim · 2026-05-30
 
 ---
 
