@@ -33,13 +33,23 @@ The name is accurate: the archive converges on a stable neural representation of
 | **Type-aware routing** | Text/code/JSON → ROSA-ANS compressed + fingerprinted. Images → ElasticTok. Audio → SpikeVox. Neural weights → BitNet b1.58. Binary → clean passthrough |
 | **Benchmark tab** | Built-in WASM vs JS benchmark harness. 50 iterations per path, median reported. Three payload sizes and types. Speedup displayed per codec direction |
 | **Path-based addressing (v0.9)** | Path prefix input on ingest. Files grouped by path in sidebar folder tree. Path shown in query results and browse detail. Full round-trip through `.cns` export/import |
-| **MV AutopoieticOptimizer schema (v0.9)** | CNS header now carries a rich schema field: unique paths, folder structure summary, entry path manifest. SHA-256 checksum replaces DJB2 parity. Dual-mode verification: v0.9 SHA-256 with DJB2 fallback for legacy archives |
+| **CNS schema + SHA-256 (v0.9)** | CNS header carries rich schema: unique paths, folder structure, entry manifest. SHA-256 checksum replaces DJB2 parity. Dual-mode verification: v0.9 SHA-256 with DJB2 fallback for legacy archives |
+| **MV AutopoieticOptimizer (v1.0)** | Self-healing active integrity layer. Named for Maturana & Varela. Fires when H¹(ℱ) exceeds threshold. Restriction map gradient descent reduces cross-modal coboundary. Corrupt entries reconstructed from nearest-neighbor SheafMemory context |
 | **WebCrypto AES-GCM keyed mode** | Lock the archive behind a passphrase. Neural Graffiti compatible |
 | **Self-contained seed reader** | Every `.cns` export embeds its own reader. Send the file. They open it. Full search, browse, extract, contradictions — no install |
 
 ---
 
 ## Changelog
+
+### v1.0 — 2026-06-05
+
+- **MV AutopoieticOptimizer** — self-healing active integrity layer. Named for Maturana and Varela, whose autopoiesis work this project is now building rather than writing white papers about. Fires automatically in `refresh()` when H¹(ℱ) > 0.4 and a 5-step cooldown has elapsed. Two active mechanisms: (1) restriction map gradient descent — SGD nudge on `_rm[a→b]` scale vectors for cross-modal high-coboundary pairs, clamped `[0.1, 10.0]` to prevent collapse; (2) three-mode integrity scan — missing fingerprints regenerated from chunks and re-indexed in SheafMemory, missing chunks converted to ghost entries (fingerprint remains queryable), corrupt stored bytes diagnosed via Fisher-Rao `topK` nearest-neighbor lookup. *"The hallucination property of neural systems becomes a recovery property for storage."* — CNS_SPEC §5. Built by Kehai Interim
+- **Autopoiesis tab** — new tab exposing optimizer state: fire log (step, H¹ norm, type, heals count), heal log (filename, issue, action taken), stat grid (total fires, total heals, threshold, cooldown), manual "⟳ Integrity Scan" button that force-fires regardless of cooldown/threshold for on-demand integrity checking. Built by Kehai Interim
+- **Stack string updated** — `+MVAutopoieticOptimizer` added to generator string and CNS header stack field throughout, including seed reader
+- **Routing table updated** — self-healing row added: `✓ v1.0`
+- **Version bumped throughout** — title, logo-sub, `buildPayload()` version + generator, keyed export header, header comment block
+- **Credits** — Kehai Interim · Kham Kizer · 2026-06-05
 
 ### v0.9.1 — 2026-05-30
 
@@ -95,7 +105,7 @@ The name is accurate: the archive converges on a stable neural representation of
 |-----------|----------------|-----------|
 | Pure text / code | 5x – 8x | ROSA-ANS vs GZIP |
 | Neural weights | ~10x | BitNet b1.58 vs FP16 |
-| Voice / audio | 15x – 20x | `.pop2` synthesis (v1) |
+| Voice / audio | 15x – 20x | `.pop2` synthesis (OmniVocal) |
 | Security / log data | 30x+ | ROSA pattern detection |
 | Mixed workload | ~10x average | Full stack |
 
@@ -110,6 +120,7 @@ Traditional storage is passive. `.cns` is active storage.
 - **Files are ROSA paths**, not byte streams. Files that share patterns share nodes — global deduplication is structural
 - **Folders are sheaves of constraints**, not lists. Adding a file triggers H¹(ℱ) consistency check
 - **Search is inference**, not scan. Semantic query to a neural index that already understands the contents
+- **The archive heals itself.** The MV AutopoieticOptimizer monitors for contradiction and corruption, and repairs from context. The hallucination property of neural systems becomes a recovery property for storage
 - **The archive and its reader are the same file.** The Jiden Furui principle: you do not need external software to open a `.cns` file
 
 ---
@@ -118,8 +129,7 @@ Traditional storage is passive. `.cns` is active storage.
 
 | Scope | Feature |
 |-------|---------|
-| v0.9.1 (current) | Xinu compliance: PDF.js external dependency removed, native zero-dependency PDF extractor |
-| v1 | MV AutopoieticOptimizer self-healing layer |
+| v1.0 (current) | MV AutopoieticOptimizer — self-healing active integrity layer |
 | Caput scope | `.cns` as OS boot volume in [Caput Ex Simulacra](https://github.com/ConsciousNode/Simulacra) |
 
 ---
@@ -135,6 +145,7 @@ Traditional storage is passive. `.cns` is active storage.
 | ElasticTok (Simulacra) | Vision layer — spatial patch fingerprinting |
 | SpikeVox (Simulacra) | Audio layer — LIF spike encoding |
 | OOMB (HTMLNLM) | Transport layer — constant-memory streaming |
+| MVAutopoieticOptimizer | Integrity layer — self-healing on contradiction |
 
 ---
 
@@ -153,8 +164,10 @@ Traditional storage is passive. `.cns` is active storage.
 **ROSA-ANS codec / 968-byte WASM binary:** Ed Interim
 **Path-based addressing / folder tree:** Ed Interim · Kehai Interim (power merge, v0.9)
 **SHA-256 checksum / MV schema:** Ed Interim · Kehai Interim (v0.9)
+**MVAutopoieticOptimizer / Autopoiesis tab:** Kehai Interim (v1.0)
 **FPSS v0.9:** Kham Kizer · Ed Interim · Kehai Interim · 2026-05-30
 **FPSS v0.9.1:** Kehai Interim · 2026-05-30
+**FPSS v1.0:** Kehai Interim · Kham Kizer · 2026-06-05
 
 ---
 
