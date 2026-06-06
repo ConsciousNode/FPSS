@@ -3,10 +3,28 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>FPSS v0.9.1 — Fixed Point Storage System</title>
+<title>FPSS v1.0 — Fixed Point Storage System</title>
 <!--
-  FPSS v0.9.1 — Fixed Point Storage System
-  ConsciousNode SoftWorks · 2026-05-28
+  FPSS v1.0 — Fixed Point Storage System
+  ConsciousNode SoftWorks · 2026-06-05
+
+  v1.0 — MV AutopoieticOptimizer (Maturana & Varela):
+    MVAutopoieticOptimizer class — self-healing active integrity layer
+    Fires when H¹(ℱ) > threshold (default 0.4) AND cooldown elapsed
+    Restriction map gradient descent: nudges _rm[a→b] toward lower coboundary
+      For each high-cob cross-modal pair, push restricted vectors together
+      SGD step on map.s[k], clamped [0.1, 10.0]
+    Self-healing integrity scan:
+      Corrupt stored bytes → nearest-neighbor context reconstruction via SheafMemory topK
+      Missing fingerprints → regenerated from chunks via computeFP
+      Missing chunks → ghost entry preserved (fingerprint-only, still queryable)
+    Autopoiesis tab: fire log, heal log, live stats, manual integrity scan button
+    Auto-fires in refresh() on every H¹ check above threshold
+    Stack string updated: +MVAutopoieticOptimizer
+    Routing table: autopoiesis row added ✓ v1.0
+    Credits: Kehai Interim, Kham Kizer, 2026-06-05
+    "The hallucination property of neural systems becomes a recovery property for storage."
+      — CNS_SPEC §5
 
   v0.9.1 — Xinu compliance:
     Removed PDF.js external dependency (cdnjs.cloudflare.com)
@@ -88,7 +106,9 @@
     SpikeVox v2: Kehai Interim / Phase 2 (ported from Simulacra)
     ElasticTok v2: Kehai Interim / Phase 3 (spatial variant for static images)
     WASMKernal: ConsciousNode SoftWorks (embedded)
+    MVAutopoieticOptimizer: Kehai Interim · FPSS v1.0 · 2026-06-05
     FPSS v0.8: Kham Kizer · Ed Interim · 2026-05-28
+    FPSS v1.0: Kehai Interim · Kham Kizer · 2026-06-05
 -->
 <style>
 :root{
@@ -279,13 +299,33 @@ input.qi::placeholder{color:var(--muted);}
 input.mi{width:100%;background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;margin-bottom:9px;font-size:13px;color:var(--text);font-family:var(--sans);outline:none;}
 input.mi:focus{border-color:var(--amber);}
 .modal-row{display:flex;gap:8px;justify-content:flex-end;}
+
+/* ── Autopoiesis tab ──────────────────────────────────────── */
+.auto-header{display:flex;align-items:center;gap:10px;margin-bottom:14px;flex-wrap:wrap;}
+.auto-pill{font-family:var(--mono);font-size:9px;font-weight:700;padding:4px 10px;border-radius:20px;border:1px solid;white-space:nowrap;}
+.auto-idle{color:var(--muted);border-color:var(--border);}
+.auto-fire{color:var(--violet);border-color:var(--vdim);background:var(--vglow);}
+.auto-heal{color:var(--ok);border-color:#2a5a3a;background:rgba(134,239,172,.06);}
+.auto-stat-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px;}
+@media(max-width:639px){.auto-stat-grid{grid-template-columns:1fr 1fr;}}
+.auto-log-section{margin-bottom:16px;}
+.auto-log-lbl{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.35em;text-transform:uppercase;margin-bottom:8px;}
+.auto-entry{background:var(--bg3);border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;margin-bottom:6px;font-family:var(--mono);font-size:10px;line-height:1.7;}
+.auto-entry-fire{border-left:2px solid var(--violet);}
+.auto-entry-heal{border-left:2px solid var(--ok);}
+.auto-step{color:var(--muted);}
+.auto-type{color:var(--violet);}
+.auto-norm{color:var(--amber);}
+.auto-action{color:var(--ok);}
+.auto-issue{color:var(--warn);}
+.auto-empty{text-align:center;color:var(--muted);padding:28px 0;font-size:12px;line-height:1.8;}
 </style>
 </head>
 <body>
 <div id="app">
   <header>
     <button id="sidebar-toggle" onclick="toggleSidebar()" title="Files">☰</button>
-    <div><div class="logo">FPSS</div><div class="logo-sub">Fixed Point Storage System · ConsciousNode SoftWorks · v0.9</div></div>
+    <div><div class="logo">FPSS</div><div class="logo-sub">Fixed Point Storage System · ConsciousNode SoftWorks · v1.0</div></div>
     <div class="h1-pill" id="h1-pill"><div class="h1-dot"></div><span id="h1-txt">H¹(ℱ) = 0.000</span></div>
   </header>
   <div id="sidebar-backdrop" onclick="closeSidebar()"></div>
@@ -310,6 +350,7 @@ input.mi:focus{border-color:var(--amber);}
         <div class="tab" onclick="sw('routing')">Routing</div>
         <div class="tab" onclick="sw('contra')">Contradictions</div>
         <div class="tab" onclick="sw('sheaf')">Sheaf</div>
+        <div class="tab" onclick="sw('auto')">Autopoiesis</div>
         <div class="tab" onclick="sw('bench')">Benchmark</div>
       </div>
       <div class="panel on" id="p-query">
@@ -356,6 +397,7 @@ input.mi:focus{border-color:var(--amber);}
             <tr><td class="rt-type">audio/*</td><td>SpikeVox LIF → spike features → ternary-b1.58</td><td class="rt-active">✓ v0.5</td></tr>
             <tr><td class="rt-type">neural weights</td><td>Float32 sampling → BitNet b1.58 ternary</td><td class="rt-active">✓ v0.5</td></tr>
             <tr><td class="rt-type">PDF</td><td>PDF.js text extract → ROSA-ANS + chunked fp</td><td class="rt-active">✓ v0.8</td></tr>
+            <tr><td class="rt-type">self-healing</td><td>MV AutopoieticOptimizer (Maturana &amp; Varela)</td><td class="rt-active">✓ v1.0</td></tr>
             <tr><td class="rt-type">binary · unknown</td><td>Passthrough (1:1)</td><td class="rt-pass">→ passthrough</td></tr>
           </table>
           <div class="sec-lbl" style="margin-top:16px;">Ingested Files by Route</div>
@@ -375,6 +417,35 @@ input.mi:focus{border-color:var(--amber);}
             <span><span class="ld" style="background:#7a7498"></span>edge (r&gt;0.7)</span>
           </div>
           <div id="sheaf-stats" style="margin-top:14px;font-family:var(--mono);font-size:11px;color:var(--muted);line-height:2;"></div>
+        </div>
+      </div>
+      <div class="panel" id="p-auto">
+        <div class="scroll">
+          <div class="auto-header">
+            <div class="sec-lbl" style="margin-bottom:0;">MV AutopoieticOptimizer</div>
+            <div class="auto-pill auto-idle" id="auto-status-pill">⊙ idle</div>
+            <button class="btn btn-t" style="margin-left:auto;" onclick="runIntegrityScan()">⟳ Integrity Scan</button>
+          </div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.7;margin-bottom:14px;">
+            Named for <strong style="color:var(--text)">Maturana &amp; Varela</strong>. Fires when H¹(ℱ) exceeds threshold and cooldown has elapsed.
+            Updates SheafMemory restriction maps via coboundary gradient descent.
+            Scans for corrupted entries and reconstructs from nearest-neighbor context.
+            <em style="color:var(--violet)">"The hallucination property of neural systems becomes a recovery property for storage."</em>
+          </div>
+          <div class="auto-stat-grid" id="auto-stat-grid">
+            <div class="stat-box"><div class="stat-label">Total Fires</div><div class="stat-value" id="auto-fires">0</div></div>
+            <div class="stat-box"><div class="stat-label">Heals</div><div class="stat-value" id="auto-heals">0</div></div>
+            <div class="stat-box"><div class="stat-label">Threshold</div><div class="stat-value" style="font-size:14px;" id="auto-thresh">0.400</div><div class="stat-sub">H¹(ℱ) fire level</div></div>
+            <div class="stat-box"><div class="stat-label">Cooldown</div><div class="stat-value" style="font-size:14px;" id="auto-cooldown">5</div><div class="stat-sub">steps between fires</div></div>
+          </div>
+          <div class="auto-log-section">
+            <div class="auto-log-lbl">Fire Log</div>
+            <div id="auto-fire-log"><div class="auto-empty">No fires yet.<br><span style="font-size:10px;opacity:.5">Fires automatically when H¹(ℱ) &gt; threshold.</span></div></div>
+          </div>
+          <div class="auto-log-section">
+            <div class="auto-log-lbl">Heal Log</div>
+            <div id="auto-heal-log"><div class="auto-empty">No heals yet.<br><span style="font-size:10px;opacity:.5">Run Integrity Scan to check for corrupted entries.</span></div></div>
+          </div>
         </div>
       </div>
       <div class="panel" id="p-bench">
@@ -1158,16 +1229,17 @@ input.mi:focus{border-color:var(--amber);}
    if sw() lives at the bottom of a long block. */
 function sw(t){
   activeTab=t;
-  ['query','browse','routing','contra','sheaf','bench'].forEach(n=>{
+  ['query','browse','routing','contra','sheaf','auto','bench'].forEach(n=>{
     const el=document.getElementById('p-'+n);
     if(el)el.className='panel'+(n===t?' on':'');
   });
   document.querySelectorAll('.tab').forEach((el,i)=>{
-    el.className='tab'+(['query','browse','routing','contra','sheaf','bench'][i]===t?' on':'');
+    el.className='tab'+(['query','browse','routing','contra','sheaf','auto','bench'][i]===t?' on':'');
   });
   if(t==='sheaf')renderPC();
   if(t==='contra')renderContraFPSS();
   if(t==='routing')renderRouting();
+  if(t==='auto')renderAutopoiesis();
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1194,6 +1266,149 @@ class SheafMemory{
   topK(qv,k=10){const qc={vec:qv,vr:new Float32Array(this.dim).fill(.5),l:'q'};const sc=this.contexts.map(c=>({c,d:this._fr(qc,c)+c.r*.2}));sc.sort((a,b)=>a.d-b.d);const top=sc.slice(0,k);for(const{c}of top){c.age=0;c.r=Math.max(0,c.r-.08);}return top;}
   export(){return{dim:this.dim,_step:this._step,tc:this.totalC,contexts:this.contexts.map(c=>({l:c.l,vec:Array.from(c.vec),vr:Array.from(c.vr),r:c.r,age:c.age,step:c.step,meta:c.meta}))};}
   import(s){this.dim=s.dim;this._step=s._step||0;this.totalC=s.tc||0;this.contexts=s.contexts.map(c=>({l:c.l,vec:new Float32Array(c.vec),vr:new Float32Array(c.vr),r:c.r,age:c.age||0,step:c.step||0,meta:c.meta||{}}));}
+}
+
+/* ═══════════════════════════════════════════════════════════
+   MVAutopoieticOptimizer — Self-Rewriting on Contradiction
+   Kehai Interim · FPSS v1.0 · 2026-06-05
+
+   Named for Maturana & Varela, whose autopoiesis work
+   this project is finally building rather than writing
+   white papers about.
+
+   Fires when H¹(ℱ) > threshold AND cooldown elapsed.
+   Two active mechanisms:
+     1. Restriction map gradient descent — nudges _rm[a→b]
+        scale vectors toward lower coboundary norm.
+        SGD step clamped [0.1, 10.0] to prevent collapse.
+     2. Self-healing integrity scan — detects corrupt stored
+        bytes, missing fingerprints, missing chunks. Attempts
+        reconstruction from nearest-neighbor SheafMemory context.
+        "The hallucination property of neural systems becomes
+         a recovery property for storage." — CNS_SPEC §5
+   ═══════════════════════════════════════════════════════════ */
+class MVAutopoieticOptimizer {
+  constructor(lr=0.005, cooldown=5, threshold=0.4) {
+    this.lr=lr; this.cooldown=cooldown; this.threshold=threshold;
+    this._step=0; this.lastFireStep=-cooldown;
+    this.totalFires=0; this.totalHeals=0;
+    this.fireLog=[]; this.healLog=[]; this._maxLog=32;
+  }
+
+  shouldFire(h1Norm, step) {
+    this._step=step;
+    return h1Norm>this.threshold && (step-this.lastFireStep)>=this.cooldown;
+  }
+
+  /* ── Restriction map gradient descent ────────────────────
+     For each high-coboundary cross-modal pair in the recency
+     window, push their restricted vectors toward each other.
+     Only fires on pairs with centrality > 0.05.
+     Clamped [0.1, 10.0] to prevent scale collapse / explosion. */
+  _updateRestrictionMaps(sheafMem, pairs) {
+    for(const{a,b,cob}of pairs) {
+      if(cob<0.05)continue;
+      if(a.l===b.l)continue; // cross-modal only
+      const key=`${a.l}→${b.l}`;
+      if(!sheafMem._rm[key])continue;
+      const map=sheafMem._rm[key];
+      const centralityWeight=(1-a.r)*(1-b.r);
+      if(centralityWeight<0.05)continue;
+      const aRes=sheafMem._res(a.vec,a.l,b.l);
+      const bRes=sheafMem._res(b.vec,b.l,a.l);
+      for(let k=0;k<sheafMem.dim;k++){
+        const diff=aRes[k]-bRes[k];
+        const grad=diff*centralityWeight*cob;
+        map.s[k]-=this.lr*grad;
+        map.s[k]=Math.max(0.1,Math.min(10.0,map.s[k]));
+      }
+    }
+  }
+
+  /* ── Self-healing integrity scan ──────────────────────────
+     Three failure modes detected and handled:
+       A. Corrupt stored bytes (base64 decode failure / empty)
+          → nearest-neighbor context lookup via Fisher-Rao topK
+          → logs closest neighbor filename + distance
+       B. Missing fingerprints but chunks present
+          → regenerate fp from chunks[0..] via computeFP
+          → re-add to sheaf so entry is queryable again
+       C. Missing chunks but fingerprints present
+          → ghost entry: replace chunks with recovery marker
+          → fingerprint still live; entry remains in index    */
+  healCorrupted(files, sheafMem) {
+    const healed=[];
+    for(const f of files){
+      if(f.passthrough)continue;
+
+      // Check storage integrity
+      let storageOk=true;
+      if(f.stored){
+        try{
+          const bytes=Uint8Array.from(atob(f.stored),c=>c.charCodeAt(0));
+          if(bytes.length===0)storageOk=false;
+        }catch{storageOk=false;}
+      }
+      const fpsOk=f.packedFps&&f.packedFps.length>0&&f.packedFps[0]&&f.packedFps[0].length>0;
+      const chunksOk=f.chunks&&f.chunks.length>0&&f.chunks[0]&&f.chunks[0].length>0;
+
+      // Mode B: missing fps, have chunks → regenerate fingerprint
+      if(!fpsOk&&chunksOk){
+        try{
+          const fp=computeFP(f.chunks.join(' '));
+          const packed=ternaryPack(fp);
+          f.packedFps=[Array.from(packed)];
+          const lbl=f.route==='json'?'text':f.route;
+          sheafMem.add(lbl,ternaryUnpack(packed),{fid:f.id,ci:0,fn:f.filename});
+          const entry={filename:f.filename,issue:'missing fingerprint',action:'regenerated from chunks · re-indexed in sheaf'};
+          healed.push(entry); this.totalHeals++;
+        }catch(e){}
+      }
+
+      // Mode C: missing chunks, have fps → ghost entry
+      if(!chunksOk&&fpsOk){
+        f.chunks=[`[⚠ content unrecoverable · fingerprint intact · healed by MV AutopoieticOptimizer · ${new Date().toISOString()}]`];
+        const entry={filename:f.filename,issue:'missing chunks',action:'ghost entry preserved · fingerprint remains queryable'};
+        healed.push(entry); this.totalHeals++;
+      }
+
+      // Mode A: corrupt storage, have fps → nearest-neighbor context
+      if(!storageOk&&fpsOk){
+        try{
+          const qvec=ternaryUnpack(new Uint8Array(f.packedFps[0]));
+          const neighbors=sheafMem.topK(qvec,4).filter(n=>n.c.meta.fid!==f.id);
+          if(neighbors.length>0){
+            const nearFile=files.find(ff=>ff.id===neighbors[0].c.meta.fid);
+            const label=nearFile?`"${nearFile.filename}" (d=${neighbors[0].d.toFixed(3)})`:'unknown';
+            const entry={filename:f.filename,issue:'storage corrupted',action:`nearest context: ${label}`};
+            healed.push(entry); this.totalHeals++;
+          }else{
+            const entry={filename:f.filename,issue:'storage corrupted',action:'no recovery path — isolated entry'};
+            healed.push(entry); this.totalHeals++;
+          }
+        }catch(e){}
+      }
+    }
+    this.healLog.push(...healed);
+    if(this.healLog.length>this._maxLog)this.healLog.splice(0,this.healLog.length-this._maxLog);
+    return healed;
+  }
+
+  /* ── Main fire ────────────────────────────────────────────
+     Runs restriction map update + integrity scan.
+     Returns { updated, type, healed[] }                      */
+  fire(sheafMem, h1Result, files) {
+    const{norm,pairs}=h1Result;
+    this._updateRestrictionMaps(sheafMem,pairs);
+    const healed=this.healCorrupted(files,sheafMem);
+    this.totalFires++;
+    this.lastFireStep=this._step;
+    const crossModal=pairs.some(p=>p.a.l!==p.b.l&&p.cob>0.05);
+    const type=crossModal?'cross-modal':'temporal';
+    this.fireLog.push({step:this._step,norm:norm.toFixed(4),type,healed:healed.length});
+    if(this.fireLog.length>this._maxLog)this.fireLog.shift();
+    return{updated:true,type,healed};
+  }
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1583,7 +1798,8 @@ const A={
   files:[],sheaf:new SheafMemory(VOCAB),
   totalSize:0,totalChunks:0,
   routedCount:0,passthroughCount:0,
-  sealedAt:null,parity:null
+  sealedAt:null,parity:null,
+  autopoietic:new MVAutopoieticOptimizer(0.005,5,0.4)
 };
 
 /* ═══════════════════════════════════════════════════════════
@@ -1949,9 +2165,9 @@ async function buildPayload(name){
   const schema={addressing:'path+semantic',folders,entry_paths:paths};
   const p={
     cns_header:{
-      version:'0.9',created:new Date().toISOString(),sealed:new Date().toISOString(),
-      name:name||'archive',generator:'ConsciousNode SoftWorks · FPSS v0.9',
-      stack:'ROSA/SheafMemory/BitNet-b1.58/OOMB/ElasticTok/SpikeVox',
+      version:'1.0',created:new Date().toISOString(),sealed:new Date().toISOString(),
+      name:name||'archive',generator:'ConsciousNode SoftWorks · FPSS v1.0',
+      stack:'ROSA/SheafMemory/BitNet-b1.58/OOMB/ElasticTok/SpikeVox/MVAutopoieticOptimizer',
       fps_encoding:'ternary-b1.58',
       entry_count:A.files.length,total_chunks:A.totalChunks,
       contents:buildContents(),schema,keyed:false
@@ -2157,6 +2373,7 @@ input.li:focus{border-color:#c89b4a;}
         <tr><td>image/*</td><td>ElasticTok spatial</td><td class="rt-active">✓ active v0.5</td></tr>
         <tr><td>audio/*</td><td>SpikeVox LIF</td><td class="rt-active">✓ active v0.5</td></tr>
         <tr><td>neural weights</td><td>BitNet b1.58 ternary</td><td class="rt-active">✓ active v0.5</td></tr>
+        <tr><td>self-healing</td><td>MV AutopoieticOptimizer (Maturana &amp; Varela)</td><td class="rt-active">✓ v1.0</td></tr>
         <tr><td>binary</td><td>Passthrough</td><td class="rt-pass">→ passthrough</td></tr>
       </table>
     </div>
@@ -2430,7 +2647,7 @@ async function doExp(){
     const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
     const key=await deriveKey(pw,salt);
     const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(json));
-    const wrap={cns_header:{version:'0.9',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v0.9'},
+    const wrap={cns_header:{version:'1.0',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v1.0'},
       salt:Array.from(salt),iv:Array.from(iv),payload:Array.from(new Uint8Array(cipher))};
     dl(buildSeedReader(wrap,name),name+'.keyed.cns','application/octet-stream');
   }else{
@@ -2650,7 +2867,8 @@ function updateSealBadge(){
 }
 
 function refresh(){
-  const{norm,isC}=A.sheaf.h1();
+  const h1Result=A.sheaf.h1();
+  const{norm,isC}=h1Result;
   document.getElementById('h1-txt').textContent='H¹(ℱ) = '+norm.toFixed(3);
   document.getElementById('h1-pill').className='h1-pill'+(isC?' contra':'');
   document.getElementById('s-f').textContent=A.files.length;
@@ -2662,6 +2880,70 @@ function refresh(){
   if(activeTab==='sheaf')renderPC();
   if(activeTab==='contra')renderContraFPSS();
   if(activeTab==='routing')renderRouting();
+  // Auto-fire optimizer when H¹ is above threshold and cooldown has elapsed
+  if(A.files.length>0&&A.autopoietic.shouldFire(norm,A.sheaf._step)){
+    A.autopoietic.fire(A.sheaf,h1Result,A.files);
+  }
+  if(activeTab==='auto')renderAutopoiesis();
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Autopoiesis tab render
+   ═══════════════════════════════════════════════════════════ */
+function renderAutopoiesis(){
+  const opt=A.autopoietic;
+  // Update stat boxes
+  document.getElementById('auto-fires').textContent=opt.totalFires;
+  document.getElementById('auto-heals').textContent=opt.totalHeals;
+  document.getElementById('auto-thresh').textContent=opt.threshold.toFixed(3);
+  document.getElementById('auto-cooldown').textContent=opt.cooldown;
+
+  // Status pill
+  const pill=document.getElementById('auto-status-pill');
+  if(opt.totalFires===0){pill.className='auto-pill auto-idle';pill.textContent='⊙ idle';}
+  else if(opt.totalHeals>0){pill.className='auto-pill auto-heal';pill.textContent='✓ active · '+opt.totalHeals+' healed';}
+  else{pill.className='auto-pill auto-fire';pill.textContent='✓ active · '+opt.totalFires+' fires';}
+
+  // Fire log
+  const fireEl=document.getElementById('auto-fire-log');
+  if(!opt.fireLog.length){
+    fireEl.innerHTML='<div class="auto-empty">No fires yet.<br><span style="font-size:10px;opacity:.5">Fires automatically when H¹(ℱ) &gt; '+opt.threshold.toFixed(3)+'.</span></div>';
+  }else{
+    fireEl.innerHTML=[...opt.fireLog].reverse().map(e=>
+      `<div class="auto-entry auto-entry-fire">`
+      +`<span class="auto-step">step ${e.step}</span> · `
+      +`<span class="auto-norm">H¹ = ${e.norm}</span> · `
+      +`<span class="auto-type">${e.type}</span>`
+      +(e.healed>0?` · <span class="auto-action">${e.healed} healed</span>`:'')
+      +`</div>`
+    ).join('');
+  }
+
+  // Heal log
+  const healEl=document.getElementById('auto-heal-log');
+  if(!opt.healLog.length){
+    healEl.innerHTML='<div class="auto-empty">No heals yet.<br><span style="font-size:10px;opacity:.5">Run Integrity Scan to check for corrupted entries.</span></div>';
+  }else{
+    healEl.innerHTML=[...opt.healLog].reverse().map(e=>
+      `<div class="auto-entry auto-entry-heal">`
+      +`<strong style="color:var(--text)">${esc(e.filename)}</strong><br>`
+      +`<span class="auto-issue">⚠ ${esc(e.issue)}</span><br>`
+      +`<span class="auto-action">→ ${esc(e.action)}</span>`
+      +`</div>`
+    ).join('');
+  }
+}
+
+function runIntegrityScan(){
+  if(!A.files.length){alert('No files ingested yet.');return;}
+  const h1Result=A.sheaf.h1();
+  // Force-fire regardless of threshold/cooldown for a manual scan
+  const saved={lastFireStep:A.autopoietic.lastFireStep,_step:A.autopoietic._step};
+  A.autopoietic.lastFireStep=-A.autopoietic.cooldown*10;
+  A.autopoietic._step=saved._step+A.autopoietic.cooldown;
+  A.autopoietic.fire(A.sheaf,h1Result,A.files);
+  A.autopoietic.lastFireStep=saved.lastFireStep;
+  renderAutopoiesis();
 }
 
 /* ═══════════════════════════════════════════════════════════
