@@ -2242,9 +2242,13 @@ async function restorePayload(data){
    Fully featured: query, browse (thumbnails), contradictions,
    sheaf, routing. Zero dependencies. Opens in any browser.
    ═══════════════════════════════════════════════════════════ */
-function buildSeedReader(payload,name){
+function buildSeedReader(payload,name,fpssB64){
   const dataJson=JSON.stringify(payload).replace(/<\/script>/g,'<\\/script>');
   const n=esc(name||'archive');
+  const fpssConst=fpssB64?`const FPSS_B64='${fpssB64}';`:'const FPSS_B64=null;';
+  const getFpssBtn=fpssB64
+    ?`<button class="btn btn-t" style="font-size:9px;padding:3px 8px;flex-shrink:0" onclick="extractFPSS()" title="Download the full FPSS app — create new archives, add to this one">↓ Get FPSS</button>`
+    :'';
   return`<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2333,7 +2337,7 @@ input.li:focus{border-color:#c89b4a;}
 </head>
 <body>
 <div id="win" style="position:relative">
-  <div id="tb"><div class="tl tl-r"></div><div class="tl tl-y"></div><div class="tl tl-g"></div><div id="wt">loading…</div></div>
+  <div id="tb"><div class="tl tl-r"></div><div class="tl tl-y"></div><div class="tl tl-g"></div><div id="wt">loading…</div>${getFpssBtn}</div>
   <div class="tabs">
     <div class="tab on" onclick="st('q')">Query</div>
     <div class="tab" onclick="st('b')">Browse &amp; Extract</div>
@@ -2396,7 +2400,20 @@ input.li:focus{border-color:#c89b4a;}
 <script>
 'use strict';
 const RAW=${dataJson};
+${fpssConst}
 let D=null,selFid=null;
+
+function extractFPSS(){
+  if(!FPSS_B64){return;}
+  try{
+    const html=decodeURIComponent(escape(atob(FPSS_B64)));
+    const a=document.createElement('a');
+    a.href=URL.createObjectURL(new Blob([html],{type:'text/html'}));
+    a.download='FPSS.html';
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }catch(e){alert('Extract failed: '+e.message);}
+}
 
 function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;const s=2*n+1,b=new Array(s).fill(null).map(()=>({})),c=new Int32Array(s).fill(-1),d=new Int32Array(s).fill(0),e=new Int32Array(s).fill(-1);let g=0,z=1;for(let i=0;i<n;i++){const t=x[i];let r=z++;b[r]={};d[r]=d[g]+1;let p=g;while(p!==-1&&!(t in b[p])){b[p][t]=r;p=c[p];}if(p===-1){c[r]=0;}else{const q=b[p][t];if(d[p]+1===d[q]){c[r]=q;}else{const u=z++;b[u]=Object.assign({},b[q]);d[u]=d[p]+1;c[u]=c[q];e[u]=e[q];while(p!==-1&&b[p][t]===q){b[p][t]=u;p=c[p];}c[q]=c[r]=u;}}let v=g=r,a=-1;while(v!==-1){if(d[v]>0&&e[v]>=0){a=(x[e[v]+1]!==undefined)?x[e[v]+1]:-1;break;}v=c[v];}y[i]=a;v=g;while(v!==-1&&e[v]<i){e[v]=i;v=c[v];}}return y;}
 function computeFP(text){const t=text.slice(0,1024),toks=[];for(let i=0;i<t.length;i++)toks.push(Math.min(127,t.charCodeAt(i)));if(toks.length<2)return new Float32Array(128);const preds=ROSA(toks),hist=new Float32Array(128);for(const p of preds)if(p>=0&&p<128)hist[p]++;for(const tok of toks)hist[tok]+=.1;let norm=0;for(let i=0;i<128;i++)norm+=hist[i]**2;norm=Math.sqrt(norm)+1e-8;for(let i=0;i<128;i++)hist[i]/=norm;return hist;}
@@ -2642,6 +2659,8 @@ async function doExp(){
   const payload=await buildPayload(name);
   A.sealedAt=payload.cns_header.sealed;A.parity='ok';
   updateSealBadge();
+  // Capture the live FPSS source — embedded in every .cns so the recipient gets the full app
+  const fpssB64=btoa(unescape(encodeURIComponent(document.documentElement.outerHTML)));
   if(pw){
     const json=JSON.stringify(payload),enc=new TextEncoder();
     const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
@@ -2649,9 +2668,9 @@ async function doExp(){
     const cipher=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,enc.encode(json));
     const wrap={cns_header:{version:'1.0',keyed:true,name,generator:'ConsciousNode SoftWorks · FPSS v1.0'},
       salt:Array.from(salt),iv:Array.from(iv),payload:Array.from(new Uint8Array(cipher))};
-    dl(buildSeedReader(wrap,name),name+'.keyed.cns','application/octet-stream');
+    dl(buildSeedReader(wrap,name,fpssB64),name+'.keyed.cns','application/octet-stream');
   }else{
-    dl(buildSeedReader(payload,name),name+'.cns','application/octet-stream');
+    dl(buildSeedReader(payload,name,fpssB64),name+'.cns','application/octet-stream');
   }
 }
 

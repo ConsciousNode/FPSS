@@ -36,7 +36,7 @@ The name is accurate: the archive converges on a stable neural representation of
 | **CNS schema + SHA-256 (v0.9)** | CNS header carries rich schema: unique paths, folder structure, entry manifest. SHA-256 checksum replaces DJB2 parity. Dual-mode verification: v0.9 SHA-256 with DJB2 fallback for legacy archives |
 | **MV AutopoieticOptimizer (v1.0)** | Self-healing active integrity layer. Named for Maturana & Varela. Fires when H¹(ℱ) exceeds threshold. Restriction map gradient descent reduces cross-modal coboundary. Corrupt entries reconstructed from nearest-neighbor SheafMemory context |
 | **WebCrypto AES-GCM keyed mode** | Lock the archive behind a passphrase. Neural Graffiti compatible |
-| **Self-contained seed reader** | Every `.cns` export embeds its own reader. Send the file. They open it. Full search, browse, extract, contradictions — no install |
+| **Self-contained seed reader** | Every `.cns` export embeds its own reader. The reader includes a "↓ Get FPSS" button — recipients can extract the full FPSS app directly from any archive. The archive carries the tool that made it | Send the file. They open it. Full search, browse, extract, contradictions — no install |
 
 ---
 
@@ -49,6 +49,7 @@ The name is accurate: the archive converges on a stable neural representation of
 - **Stack string updated** — `+MVAutopoieticOptimizer` added to generator string and CNS header stack field throughout, including seed reader
 - **Routing table updated** — self-healing row added: `✓ v1.0`
 - **Version bumped throughout** — title, logo-sub, `buildPayload()` version + generator, keyed export header, header comment block
+- **FPSS self-propagation** — every `.cns` export now embeds the full FPSS v1.0 app as a base64 constant in its seed reader. Recipients get a "↓ Get FPSS" button in the archive title bar; clicking it extracts and downloads the complete FPSS app. The archive carries the exact version that made it. As long as a `.cns` file exists anywhere, FPSS exists. The Jiden Furui principle taken to its logical conclusion. Built by Kehai Interim · Kham Kizer
 - **Credits** — Kehai Interim · Kham Kizer · 2026-06-05
 
 ### v0.9.1 — 2026-05-30
