@@ -472,6 +472,8 @@ input.mi:focus{border-color:var(--amber);}
     <div class="spacer"></div>
     <button class="btn btn-g" onclick="openImp()">Import .cns</button>
     <button class="btn btn-a" onclick="openExp()">Export .cns</button>
+    <button class="btn btn-t" style="font-size:10px;margin-top:4px" onclick="getMainLauncher('win')" title="Windows: open .cns files in a standalone app window via Chrome --app">↓ Win Launcher</button>
+    <button class="btn btn-t" style="font-size:10px;margin-top:2px" onclick="getMainLauncher('lin')" title="Linux: open .cns files in a standalone app window via Chrome --app">↓ Linux Launcher</button>
   </div>
 </div>
 
@@ -1552,6 +1554,19 @@ async function rosaANSDecompressWasm(compressed) {
 /* Kick off kernel boot immediately so it's ready when first file drops */
 _bootWasmCodec();
 
+/* ── WASM-preferred dispatch wrappers ────────────────────────
+   rosaANSCompress / rosaANSDecompress are the public API.
+   They try the 968-byte WASM codec first; fall through to the
+   pure-JS path (jsANSCompress / jsANSDecompress defined in the
+   Benchmark section) if WASM is unavailable or payload is too large.
+   This is the function that was missing in v0.9.1 — pre-existing bug.
+   Fixed in v1.0.1 by Kehai Interim.                             */
+async function rosaANSCompress(bytes){
+  const wasmResult=await rosaANSCompressWasm(bytes);
+  if(wasmResult!==null)return wasmResult;
+  return jsANSCompress(bytes);
+}
+
 
 /* ═══════════════════════════════════════════════════════════
    BitNet b1.58 ternary packing  §1.3
@@ -2247,7 +2262,9 @@ function buildSeedReader(payload,name,fpssB64){
   const n=esc(name||'archive');
   const fpssConst=fpssB64?`const FPSS_B64='${fpssB64}';`:'const FPSS_B64=null;';
   const getFpssBtn=fpssB64
-    ?`<button class="btn btn-t" style="font-size:9px;padding:3px 8px;flex-shrink:0" onclick="extractFPSS()" title="Download the full FPSS app — create new archives, add to this one">↓ Get FPSS</button>`
+    ?`<button class="btn btn-t" style="font-size:9px;padding:3px 8px;flex-shrink:0" onclick="extractFPSS()" title="Download the full FPSS app — create new archives, add to this one">↓ Get FPSS</button>
+<button class="btn btn-t" style="font-size:9px;padding:3px 8px;flex-shrink:0" onclick="getLauncher('win')" title="Windows launcher — opens this .cns in a standalone app window">↓ Win Launcher</button>
+<button class="btn btn-t" style="font-size:9px;padding:3px 8px;flex-shrink:0" onclick="getLauncher('lin')" title="Linux launcher — opens this .cns in a standalone app window">↓ Linux Launcher</button>`
     :'';
   return`<!DOCTYPE html>
 <html lang="en">
@@ -2413,6 +2430,23 @@ function extractFPSS(){
     a.click();
     setTimeout(()=>URL.revokeObjectURL(a.href),1000);
   }catch(e){alert('Extract failed: '+e.message);}
+}
+
+function getLauncher(platform){
+  const fname=document.title.replace(' · .cns','').trim()||'archive';
+  let content,ext,mime;
+  if(platform==='win'){
+    ext='bat';mime='text/plain';
+    content=`@echo off\r\nrem FPSS .cns Launcher — Windows\r\nrem Place this .bat next to your .cns file and double-click to open in a standalone window.\r\nrem Requires Chrome or Chromium. Falls back to Firefox, then default browser.\r\nset "FILE=%~dp0${fname}.cns"\r\nif not exist "%FILE%" (\r\n  echo Cannot find ${fname}.cns next to this launcher.\r\n  pause & exit /b 1\r\n)\r\nfor %%X in (chrome.exe) do (set CHROME=%%~$PATH:X)\r\nif defined CHROME (\r\n  start "" "%CHROME%" --app="file:///%FILE:\\=/%"  --window-size=960,680 --window-position=80,60\r\n  exit /b\r\n)\r\nfor %%X in (chromium.exe chromium-browser.exe) do (set CHROME=%%~$PATH:X)\r\nif defined CHROME (\r\n  start "" "%CHROME%" --app="file:///%FILE:\\=/%"  --window-size=960,680\r\n  exit /b\r\n)\r\nwhere firefox >nul 2>&1 && start "" firefox "%FILE%" && exit /b\r\nstart "" "%FILE%"\r\n`;
+  }else{
+    ext='sh';mime='text/plain';
+    content=`#!/usr/bin/env bash\n# FPSS .cns Launcher — Linux\n# Place this .sh next to your .cns file, chmod +x, then run to open in a standalone window.\n# Requires Chrome, Chromium, or Firefox.\nDIR="$(cd "$(dirname "$0")" && pwd)"\nFILE="$DIR/${fname}.cns"\nif [ ! -f "$FILE" ]; then\n  echo "Cannot find ${fname}.cns next to this launcher."\n  exit 1\nfi\nfor BIN in google-chrome google-chrome-stable chromium chromium-browser; do\n  if command -v "$BIN" &>/dev/null; then\n    "$BIN" --app="file://$FILE" --window-size=960,680 &\n    exit 0\n  fi\ndone\nif command -v firefox &>/dev/null; then\n  firefox "$FILE" &\n  exit 0\nfi\nxdg-open "$FILE"\n`;
+  }
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([content],{type:mime}));
+  a.download=`open_${fname}.${ext}`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
 }
 
 function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;const s=2*n+1,b=new Array(s).fill(null).map(()=>({})),c=new Int32Array(s).fill(-1),d=new Int32Array(s).fill(0),e=new Int32Array(s).fill(-1);let g=0,z=1;for(let i=0;i<n;i++){const t=x[i];let r=z++;b[r]={};d[r]=d[g]+1;let p=g;while(p!==-1&&!(t in b[p])){b[p][t]=r;p=c[p];}if(p===-1){c[r]=0;}else{const q=b[p][t];if(d[p]+1===d[q]){c[r]=q;}else{const u=z++;b[u]=Object.assign({},b[q]);d[u]=d[p]+1;c[u]=c[q];e[u]=e[q];while(p!==-1&&b[p][t]===q){b[p][t]=u;p=c[p];}c[q]=c[r]=u;}}let v=g=r,a=-1;while(v!==-1){if(d[v]>0&&e[v]>=0){a=(x[e[v]+1]!==undefined)?x[e[v]+1]:-1;break;}v=c[v];}y[i]=a;v=g;while(v!==-1&&e[v]<i){e[v]=i;v=c[v];}}return y;}
@@ -2652,6 +2686,23 @@ init();
 /* ═══════════════════════════════════════════════════════════
    Export / Import
    ═══════════════════════════════════════════════════════════ */
+function getMainLauncher(platform){
+  const fname=document.getElementById('exp-name').value||'archive';
+  let content,ext;
+  if(platform==='win'){
+    ext='bat';
+    content=`@echo off\r\nrem FPSS .cns Launcher — Windows\r\nrem Place next to your .cns file. Double-click to open in a standalone app window.\r\nrem Requires Chrome or Chromium. Falls back to Firefox, then default browser.\r\nset "FILE=%~dp0${fname}.cns"\r\nif not exist "%FILE%" (\r\n  echo Cannot find ${fname}.cns next to this launcher.\r\n  pause & exit /b 1\r\n)\r\nfor %%X in (chrome.exe) do (set CHROME=%%~$PATH:X)\r\nif defined CHROME (\r\n  start "" "%CHROME%" --app="file:///%FILE:\\=/%"  --window-size=960,680 --window-position=80,60\r\n  exit /b\r\n)\r\nfor %%X in (chromium.exe chromium-browser.exe) do (set CHROME=%%~$PATH:X)\r\nif defined CHROME (\r\n  start "" "%CHROME%" --app="file:///%FILE:\\=/%"  --window-size=960,680\r\n  exit /b\r\n)\r\nwhere firefox >nul 2>&1 && start "" firefox "%FILE%" && exit /b\r\nstart "" "%FILE%"\r\n`;
+  }else{
+    ext='sh';
+    content=`#!/usr/bin/env bash\n# FPSS .cns Launcher — Linux\n# Place next to your .cns file, chmod +x, then run.\nDIR="$(cd "$(dirname "$0")" && pwd)"\nFILE="$DIR/${fname}.cns"\nif [ ! -f "$FILE" ]; then\n  echo "Cannot find ${fname}.cns next to this launcher."\n  exit 1\nfi\nfor BIN in google-chrome google-chrome-stable chromium chromium-browser; do\n  if command -v "$BIN" &>/dev/null; then\n    "$BIN" --app="file://$FILE" --window-size=960,680 &\n    exit 0\n  fi\ndone\nif command -v firefox &>/dev/null; then\n  firefox "$FILE" &\n  exit 0\nfi\nxdg-open "$FILE"\n`;
+  }
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([content],{type:'text/plain'}));
+  a.download=`open_${fname}.${ext}`;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+}
+
 async function doExp(){
   const name=document.getElementById('exp-name').value||'archive';
   const pw=document.getElementById('exp-key').value;
