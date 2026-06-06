@@ -2437,16 +2437,59 @@ function getLauncher(platform){
   let content,ext,mime;
   if(platform==='win'){
     ext='bat';mime='text/plain';
-    content=`@echo off\r\nrem FPSS .cns Launcher — Windows\r\nrem Place this .bat next to your .cns file and double-click to open in a standalone window.\r\nrem Requires Chrome or Chromium. Falls back to Firefox, then default browser.\r\nset "FILE=%~dp0${fname}.cns"\r\nif not exist "%FILE%" (\r\n  echo Cannot find ${fname}.cns next to this launcher.\r\n  pause & exit /b 1\r\n)\r\nfor %%X in (chrome.exe) do (set CHROME=%%~$PATH:X)\r\nif defined CHROME (\r\n  start "" "%CHROME%" --app="file:///%FILE:\\=/%"  --window-size=960,680 --window-position=80,60\r\n  exit /b\r\n)\r\nfor %%X in (chromium.exe chromium-browser.exe) do (set CHROME=%%~$PATH:X)\r\nif defined CHROME (\r\n  start "" "%CHROME%" --app="file:///%FILE:\\=/%"  --window-size=960,680\r\n  exit /b\r\n)\r\nwhere firefox >nul 2>&1 && start "" firefox "%FILE%" && exit /b\r\nstart "" "%FILE%"\r\n`;
+    var CR='\\r\\n';
+    content='@echo off'+CR
+      +'rem FPSS .cns Launcher \u2014 Windows'+CR
+      +'rem Place next to your .cns file and double-click to open in a standalone app window.'+CR
+      +'rem Requires Chrome or Chromium. Falls back to Firefox, then default browser.'+CR
+      +'set "FILE=%~dp0'+fname+'.cns"'+CR
+      +'if not exist "%FILE%" ('+CR
+      +'  echo Cannot find '+fname+'.cns next to this launcher.'+CR
+      +'  pause & exit /b 1'+CR
+      +')'+CR
+      +'for %%X in (chrome.exe) do (set CHROME=%%~$PATH:X)'+CR
+      +'if defined CHROME ('+CR
+      +'  start "" "%CHROME%" --app="file:///%FILE:\\=/%" --window-size=960,680 --window-position=80,60'+CR
+      +'  exit /b'+CR
+      +')'+CR
+      +'for %%X in (chromium.exe chromium-browser.exe) do (set CHROME=%%~$PATH:X)'+CR
+      +'if defined CHROME ('+CR
+      +'  start "" "%CHROME%" --app="file:///%FILE:\\=/%" --window-size=960,680'+CR
+      +'  exit /b'+CR
+      +')'+CR
+      +'where firefox >nul 2>&1 && start "" firefox "%FILE%" && exit /b'+CR
+      +'start "" "%FILE%"'+CR;
+    content=content.replace(/\\r\\n/g,'\r\n');
   }else{
     ext='sh';mime='text/plain';
-    content=`#!/usr/bin/env bash\n# FPSS .cns Launcher — Linux\n# Place this .sh next to your .cns file, chmod +x, then run to open in a standalone window.\n# Requires Chrome, Chromium, or Firefox.\nDIR="$(cd "$(dirname "$0")" && pwd)"\nFILE="$DIR/${fname}.cns"\nif [ ! -f "$FILE" ]; then\n  echo "Cannot find ${fname}.cns next to this launcher."\n  exit 1\nfi\nfor BIN in google-chrome google-chrome-stable chromium chromium-browser; do\n  if command -v "$BIN" &>/dev/null; then\n    "$BIN" --app="file://$FILE" --window-size=960,680 &\n    exit 0\n  fi\ndone\nif command -v firefox &>/dev/null; then\n  firefox "$FILE" &\n  exit 0\nfi\nxdg-open "$FILE"\n`;
+    var NL='\\n';
+    content='#!/usr/bin/env bash'+NL
+      +'# FPSS .cns Launcher \u2014 Linux'+NL
+      +'# Place next to your .cns file, chmod +x, then run.'+NL
+      +'DIR="$(cd "$(dirname "$0")" && pwd)"'+NL
+      +'FILE="$DIR/'+fname+'.cns"'+NL
+      +'if [ ! -f "$FILE" ]; then'+NL
+      +'  echo "Cannot find '+fname+'.cns next to this launcher."'+NL
+      +'  exit 1'+NL
+      +'fi'+NL
+      +'for BIN in google-chrome google-chrome-stable chromium chromium-browser; do'+NL
+      +'  if command -v "$BIN" &>/dev/null; then'+NL
+      +'    "$BIN" --app="file://$FILE" --window-size=960,680 &'+NL
+      +'    exit 0'+NL
+      +'  fi'+NL
+      +'done'+NL
+      +'if command -v firefox &>/dev/null; then'+NL
+      +'  firefox "$FILE" &'+NL
+      +'  exit 0'+NL
+      +'fi'+NL
+      +'xdg-open "$FILE"'+NL;
+    content=content.replace(/\\n/g,'\n');
   }
-  const a=document.createElement('a');
+  var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([content],{type:mime}));
-  a.download=`open_${fname}.${ext}`;
+  a.download='open_'+fname+'.'+ext;
   a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  setTimeout(function(){URL.revokeObjectURL(a.href);},1000);
 }
 
 function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;const s=2*n+1,b=new Array(s).fill(null).map(()=>({})),c=new Int32Array(s).fill(-1),d=new Int32Array(s).fill(0),e=new Int32Array(s).fill(-1);let g=0,z=1;for(let i=0;i<n;i++){const t=x[i];let r=z++;b[r]={};d[r]=d[g]+1;let p=g;while(p!==-1&&!(t in b[p])){b[p][t]=r;p=c[p];}if(p===-1){c[r]=0;}else{const q=b[p][t];if(d[p]+1===d[q]){c[r]=q;}else{const u=z++;b[u]=Object.assign({},b[q]);d[u]=d[p]+1;c[u]=c[q];e[u]=e[q];while(p!==-1&&b[p][t]===q){b[p][t]=u;p=c[p];}c[q]=c[r]=u;}}let v=g=r,a=-1;while(v!==-1){if(d[v]>0&&e[v]>=0){a=(x[e[v]+1]!==undefined)?x[e[v]+1]:-1;break;}v=c[v];}y[i]=a;v=g;while(v!==-1&&e[v]<i){e[v]=i;v=c[v];}}return y;}
