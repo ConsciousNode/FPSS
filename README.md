@@ -42,6 +42,17 @@ The name is accurate: the archive converges on a stable neural representation of
 
 ## Changelog
 
+### v1.0.1 — 2026-06-07
+
+Three post-release bug fixes, all targeting the self-propagation pipeline:
+
+- **`.cns` MIME type regression** — `.cns` exports were downloading as `text/html`, causing browsers to save them with a `.html` extension instead of `.cns`. The self-propagation feature (every archive carries the tool that made it) silently broke when recipients received a `.html` file that didn't identify itself as a `.cns` archive. Fixed
+- **Seed reader RAW extraction regex** — the non-greedy match in the seed reader's source extraction regex was silently failing on large archives. The seed reader is what lets recipients extract the full FPSS app from any `.cns` file; on large archives it was returning nothing. Fixed: regex corrected to handle arbitrary archive sizes
+- **Browse tab population on large archives** — browse tab wasn't populating entry list on large archives. Downstream of the regex fix; once extraction was correct, the browse tab could read the full entry manifest
+
+All three bugs were introduced during the v1.0 MVAutopoieticOptimizer refactor and attack the same thing from different angles: the round-trip reliability of `.cns` as a self-contained, self-propagating format.
+
+
 ### v1.0 — 2026-06-05
 
 - **MV AutopoieticOptimizer** — self-healing active integrity layer. Named for Maturana and Varela, whose autopoiesis work this project is now building rather than writing white papers about. Fires automatically in `refresh()` when H¹(ℱ) > 0.4 and a 5-step cooldown has elapsed. Two active mechanisms: (1) restriction map gradient descent — SGD nudge on `_rm[a→b]` scale vectors for cross-modal high-coboundary pairs, clamped `[0.1, 10.0]` to prevent collapse; (2) three-mode integrity scan — missing fingerprints regenerated from chunks and re-indexed in SheafMemory, missing chunks converted to ghost entries (fingerprint remains queryable), corrupt stored bytes diagnosed via Fisher-Rao `topK` nearest-neighbor lookup. *"The hallucination property of neural systems becomes a recovery property for storage."* — CNS_SPEC §5. Built by Kehai Interim

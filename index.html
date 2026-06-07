@@ -1256,7 +1256,7 @@ function ROSA(x){const n=x.length,y=new Int32Array(n).fill(-1);if(!n)return y;co
    ═══════════════════════════════════════════════════════════ */
 const THRESH=0.5;
 class SheafMemory{
-  constructor(dim){this.dim=dim;this.contexts=[];this.max=256;this.lastNorm=0;this.totalC=0;this._step=0;this._rm={};}
+  constructor(dim){this.dim=dim;this.contexts=[];this.max=256;this.lastNorm=0;this.totalC=0;this._step=0;this._rm={};this._cachedH1=null;this._cachedStep=-1;}
   _rmap(a,b){if(a===b)return null;const k=a+'→'+b;if(!this._rm[k])this._rm[k]={s:new Float32Array(this.dim).fill(1),bi:new Float32Array(this.dim).fill(0)};return this._rm[k];}
   _res(v,a,b){const m=this._rmap(a,b);if(!m)return v;const o=new Float32Array(this.dim);for(let i=0;i<this.dim;i++)o[i]=m.s[i]*v[i]+m.bi[i];return o;}
   _fr(a,b){let s=0;const d=Math.min(a.vec.length,b.vec.length);for(let k=0;k<d;k++){const dd=a.vec[k]-b.vec[k];s+=(dd*dd)/((a.vr[k]+b.vr[k])+1e-6);}return Math.sqrt(s/d);}
@@ -1264,7 +1264,8 @@ class SheafMemory{
   _nov(v,l){const s=this.contexts.filter(c=>c.l===l);if(!s.length)return 1;const lc=s[s.length-1];let d=0,nv=0,nl=0;for(let k=0;k<this.dim;k++){d+=v[k]*lc.vec[k];nv+=v[k]**2;nl+=lc.vec[k]**2;}return(1-(d/(Math.sqrt(nv)*Math.sqrt(nl)+1e-8)))/2;}
   _decay(){for(const c of this.contexts){c.age++;const r=c.r,ab=c.age<3?-.05:0;c.r=Math.max(0,Math.min(.99,r+.02*(2*r/(1-r*r+1e-6)+ab)+(Math.random()-.5)*.01));}}
   add(l,v,meta={}){this._step++;const vr=new Float32Array(this.dim).fill(.5);const s=this.contexts.filter(c=>c.l===l);if(s.length){const lc=s[s.length-1];for(let k=0;k<this.dim;k++){const d=v[k]-lc.vec[k];vr[k]=Math.min(1,.7*lc.vr[k]+.3*d*d);}}const nov=this._nov(v,l);this._decay();if(this.contexts.length>=this.max){let mx=-1,mi=0;for(let i=0;i<this.contexts.length;i++)if(this.contexts[i].r>mx){mx=this.contexts[i].r;mi=i;}this.contexts.splice(mi,1);}this.contexts.push({l,vec:new Float32Array(v),vr,r:.3+.4*nov,age:0,step:this._step,meta});}
-  h1(){if(this.contexts.length<2)return{norm:0,isC:false,pairs:[]};let total=0,edges=0;const pairs=[];const n=this.contexts.length;for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){const a=this.contexts[i],b=this.contexts[j];if(Math.abs(a.step-b.step)>8)continue;const cob=this._cob(a,b)*(1-a.r)*(1-b.r);total+=cob;edges++;pairs.push({a,b,cob});}pairs.sort((x,y)=>y.cob-x.cob);const norm=edges>0?total/edges:0;this.lastNorm=norm;const isC=norm>THRESH;if(isC)this.totalC++;return{norm,isC,pairs:pairs.slice(0,8)};}
+  h1(force=false){if(!force && this._cachedStep === this._step) return this._cachedH1; const result = this._computeH1(); this._cachedH1 = result; this._cachedStep = this._step; return result;}
+  _computeH1(){if(this.contexts.length<2)return{norm:0,isC:false,pairs:[]};let total=0,edges=0;const pairs=[];const n=this.contexts.length;for(let i=0;i<n;i++)for(let j=i+1;j<n;j++){const a=this.contexts[i],b=this.contexts[j];if(Math.abs(a.step-b.step)>8)continue;const cob=this._cob(a,b)*(1-a.r)*(1-b.r);total+=cob;edges++;pairs.push({a,b,cob});}pairs.sort((x,y)=>y.cob-x.cob);const norm=edges>0?total/edges:0;this.lastNorm=norm;const isC=norm>THRESH;if(isC)this.totalC++;return{norm,isC,pairs:pairs.slice(0,8)};}
   topK(qv,k=10){const qc={vec:qv,vr:new Float32Array(this.dim).fill(.5),l:'q'};const sc=this.contexts.map(c=>({c,d:this._fr(qc,c)+c.r*.2}));sc.sort((a,b)=>a.d-b.d);const top=sc.slice(0,k);for(const{c}of top){c.age=0;c.r=Math.max(0,c.r-.08);}return top;}
   export(){return{dim:this.dim,_step:this._step,tc:this.totalC,contexts:this.contexts.map(c=>({l:c.l,vec:Array.from(c.vec),vr:Array.from(c.vr),r:c.r,age:c.age,step:c.step,meta:c.meta}))};}
   import(s){this.dim=s.dim;this._step=s._step||0;this.totalC=s.tc||0;this.contexts=s.contexts.map(c=>({l:c.l,vec:new Float32Array(c.vec),vr:new Float32Array(c.vr),r:c.r,age:c.age||0,step:c.step||0,meta:c.meta||{}}));}
@@ -1466,6 +1467,7 @@ const SRC_BASE   = 0x18000;
 const DST_BASE   = 0x80000;
 const MAX_CODEC_BYTES = 0x60000; // ~384KB safe input limit
 
+let wasmBootPromise = null;
 async function _bootWasmCodec() {
   if (_wasmCodec) return _wasmCodec;
   if (_wasmBooting) return _wasmBooting;
@@ -1505,6 +1507,7 @@ function _normalizeFreq(freq32) {
    [262+]  rANS bitstream                                        */
 
 async function rosaANSCompressWasm(bytes) {
+  if (wasmBootPromise) await wasmBootPromise;
   const codec = await _bootWasmCodec();
   if (!codec || bytes.length > MAX_CODEC_BYTES) return null;
   const {exports:exp, mem} = codec;
@@ -1534,6 +1537,7 @@ async function rosaANSCompressWasm(bytes) {
 }
 
 async function rosaANSDecompressWasm(compressed) {
+  if (wasmBootPromise) await wasmBootPromise;
   const codec = await _bootWasmCodec();
   if (!codec) return null;
   const {exports:exp, mem} = codec;
@@ -1552,7 +1556,7 @@ async function rosaANSDecompressWasm(compressed) {
 }
 
 /* Kick off kernel boot immediately so it's ready when first file drops */
-_bootWasmCodec();
+wasmBootPromise = _bootWasmCodec();
 
 /* ── WASM-preferred dispatch wrappers ────────────────────────
    rosaANSCompress / rosaANSDecompress are the public API.
@@ -1823,121 +1827,21 @@ const A={
 let ingesting=false;
 async function handleFiles(files){
   if(ingesting)return;ingesting=true;
-  const arr=Array.from(files).filter(f=>f.size<12*1024*1024);
+  const MAX_FILE_BYTES = 200 * 1024 * 1024;
+  const arr = [];
+  for (const f of files) {
+    if (f.size > MAX_FILE_BYTES) {
+      alert(`File too large: ${f.name} (${fmtBytes(f.size)}). Max 200 MB. Skipping.`);
+      continue;
+    }
+    arr.push(f);
+  }
   const pg=document.getElementById('pg');
   const prefix=(document.getElementById('pp').value||'').trim().replace(/\/+$/,'');
   for(let i=0;i<arr.length;i++){pg.style.width=((i/arr.length)*100)+'%';await ingest(arr[i],prefix);await new Promise(r=>setTimeout(r,0));}
   pg.style.width='100%';setTimeout(()=>pg.style.width='0%',700);
   ingesting=false;
 }
-
-async function ingest(file,prefix=''){
-  const route=detectRoute(file.name,file.type||'');
-  const fid=uid(),ts=new Date().toISOString();
-  const filePath=prefix?prefix+'/'+file.name:file.name;
-
-  /* ── Image ─────────────────────────────────────────────── */
-  if(route===ROUTE_IMAGE){
-    const imgData=await fingerprintImage(file);
-    if(!imgData)return ingestPassthrough(file,fid,route,ts,filePath);
-    const{packed,thumbnail,gridW,gridH,W,H}=imgData;
-    const buf=await file.arrayBuffer();
-    const rawBytes=new Uint8Array(buf);
-    const cmp=await rosaANSCompress(rawBytes);
-    const stored=bytesToBase64(cmp||rawBytes);
-    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
-    A.sheaf.add('image',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
-    A.files.push({
-      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'image/unknown',
-      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
-      chunks:[`[image: ${W}×${H} · ${gridW*gridH} patches · ElasticTok spatial]`],
-      packedFps:[Array.from(packed)],
-      thumbnail,imageW:W,imageH:H,gridW,gridH,
-      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
-    });
-    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
-    A.sealedAt=null;A.parity=null;refresh();return;
-  }
-
-  /* ── Audio ─────────────────────────────────────────────── */
-  if(route===ROUTE_AUDIO){
-    const audData=await fingerprintAudio(file);
-    if(!audData)return ingestPassthrough(file,fid,route,ts,filePath);
-    const{packed,duration,sampleRate,totalSpikes}=audData;
-    const buf=await file.arrayBuffer();
-    const rawBytes=new Uint8Array(buf);
-    const cmp=await rosaANSCompress(rawBytes);
-    const stored=bytesToBase64(cmp||rawBytes);
-    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
-    A.sheaf.add('audio',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
-    A.files.push({
-      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'audio/unknown',
-      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
-      chunks:[`[audio: ${duration.toFixed(2)}s @ ${sampleRate}Hz · ${totalSpikes} spikes · SpikeVox LIF]`],
-      packedFps:[Array.from(packed)],
-      duration,sampleRate,totalSpikes,
-      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
-    });
-    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
-    A.sealedAt=null;A.parity=null;refresh();return;
-  }
-
-  /* ── Neural weights ─────────────────────────────────────── */
-  if(route===ROUTE_WEIGHTS){
-    const wData=await fingerprintWeights(file);
-    if(!wData)return ingestPassthrough(file,fid,route,ts,filePath);
-    const{packed,numParams,ternaryBytes,float32Bytes,ratio}=wData;
-    const buf=await file.arrayBuffer();
-    const rawBytes=new Uint8Array(buf);
-    const cmp=await rosaANSCompress(rawBytes);
-    const stored=bytesToBase64(cmp||rawBytes);
-    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
-    A.sheaf.add('weights',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
-    A.files.push({
-      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'application/octet-stream',
-      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
-      chunks:[`[weights: ${numParams.toLocaleString()} params · b1.58 ${ratio} · ROSA-ANS ${compRatio}]`],
-      packedFps:[Array.from(packed)],
-      numParams,ternaryBytes,float32Bytes,compressionRatio:compRatio,
-      origSize:rawBytes.length,compSize:(cmp||rawBytes).length
-    });
-    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
-    A.sealedAt=null;A.parity=null;refresh();return;
-  }
-
-  /* ── Text / JSON — ROSA-ANS byte compression + chunked fingerprinting ── */
-  if(route===ROUTE_TEXT||route===ROUTE_JSON){
-    const text=await file.text();
-    const rawBytes=new TextEncoder().encode(text);
-    const cmp=await rosaANSCompress(rawBytes);
-    const stored=bytesToBase64(cmp||rawBytes);
-    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
-    const chunks=mkChunks(text);const packedFps=[];
-    for(let i=0;i<chunks.length;i++){
-      const fp=computeFP(chunks[i]);
-      const packed=ternaryPack(fp);
-      packedFps.push(Array.from(packed));
-      A.sheaf.add(route==='json'?'json':'text',ternaryUnpack(packed),{fid,ci:i,fn:file.name});
-      if(i%4===0)await new Promise(r=>setTimeout(r,0));
-    }
-    A.files.push({
-      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'text/plain',
-      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
-      chunks,packedFps,
-      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
-    });
-    A.totalSize+=file.size;A.totalChunks+=chunks.length;A.routedCount++;
-    A.sealedAt=null;A.parity=null;refresh();return;
-  }
-
-
-/* ── nativePdfText — zero-dependency PDF text extraction ─────────────────
-   Handles: FlateDecode content streams, Tj / TJ operators,
-            literal strings (with octal / escape), hex strings.
-   Falls through (returns null) for: encrypted PDFs, image-only,
-   broken streams — caller routes to passthrough in that case.
-   Uses DecompressionStream (deflate-raw) — available in all modern browsers.
-   ConsciousNode SoftWorks · v1.0 · 2026-05-30                            */
 
 function _pdfFindBytes(src,from,pat){
   outer:for(let i=from;i<=src.length-pat.length;i++){
@@ -2067,6 +1971,116 @@ function nativePdfPageCount(rawBytes){
   const matches=src.match(/\/Type\s*\/Page[^s]/g);
   return matches?matches.length:1;
 }
+
+async function ingest(file,prefix=''){
+  const route=detectRoute(file.name,file.type||'');
+  const fid=uid(),ts=new Date().toISOString();
+  const filePath=prefix?prefix+'/'+file.name:file.name;
+
+  /* ── Image ─────────────────────────────────────────────── */
+  if(route===ROUTE_IMAGE){
+    const imgData=await fingerprintImage(file);
+    if(!imgData)return ingestPassthrough(file,fid,route,ts,filePath);
+    const{packed,thumbnail,gridW,gridH,W,H}=imgData;
+    const buf=await file.arrayBuffer();
+    const rawBytes=new Uint8Array(buf);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
+    A.sheaf.add('image',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
+    A.files.push({
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'image/unknown',
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+      chunks:[`[image: ${W}×${H} · ${gridW*gridH} patches · ElasticTok spatial]`],
+      packedFps:[Array.from(packed)],
+      thumbnail,imageW:W,imageH:H,gridW,gridH,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
+    });
+    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Audio ─────────────────────────────────────────────── */
+  if(route===ROUTE_AUDIO){
+    const audData=await fingerprintAudio(file);
+    if(!audData)return ingestPassthrough(file,fid,route,ts,filePath);
+    const{packed,duration,sampleRate,totalSpikes}=audData;
+    const buf=await file.arrayBuffer();
+    const rawBytes=new Uint8Array(buf);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
+    A.sheaf.add('audio',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
+    A.files.push({
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'audio/unknown',
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+      chunks:[`[audio: ${duration.toFixed(2)}s @ ${sampleRate}Hz · ${totalSpikes} spikes · SpikeVox LIF]`],
+      packedFps:[Array.from(packed)],
+      duration,sampleRate,totalSpikes,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
+    });
+    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Neural weights ─────────────────────────────────────── */
+  if(route===ROUTE_WEIGHTS){
+    const wData=await fingerprintWeights(file);
+    if(!wData)return ingestPassthrough(file,fid,route,ts,filePath);
+    const{packed,numParams,ternaryBytes,float32Bytes,ratio}=wData;
+    const buf=await file.arrayBuffer();
+    const rawBytes=new Uint8Array(buf);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
+    A.sheaf.add('weights',ternaryUnpack(packed),{fid,ci:0,fn:file.name});
+    A.files.push({
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'application/octet-stream',
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+      chunks:[`[weights: ${numParams.toLocaleString()} params · b1.58 ${ratio} · ROSA-ANS ${compRatio}]`],
+      packedFps:[Array.from(packed)],
+      numParams,ternaryBytes,float32Bytes,compressionRatio:compRatio,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length
+    });
+    A.totalSize+=file.size;A.totalChunks++;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+  /* ── Text / JSON — ROSA-ANS byte compression + chunked fingerprinting ── */
+  if(route===ROUTE_TEXT||route===ROUTE_JSON){
+    const text=await file.text();
+    const rawBytes=new TextEncoder().encode(text);
+    const cmp=await rosaANSCompress(rawBytes);
+    const stored=bytesToBase64(cmp||rawBytes);
+    const compRatio=cmp?(rawBytes.length/cmp.length).toFixed(2)+'×':'1.00× (passthrough)';
+    const chunks=mkChunks(text);const packedFps=[];
+    for(let i=0;i<chunks.length;i++){
+      const fp=computeFP(chunks[i]);
+      const packed=ternaryPack(fp);
+      packedFps.push(Array.from(packed));
+      A.sheaf.add(route==='json'?'json':'text',ternaryUnpack(packed),{fid,ci:i,fn:file.name});
+      if(i%4===0)await new Promise(r=>setTimeout(r,0));
+    }
+    A.files.push({
+      id:fid,filename:file.name,path:filePath,size:file.size,type:file.type||'text/plain',
+      ts,route,passthrough:false,stored,fullText:'',ansCompressed:!!cmp,
+      chunks,packedFps,
+      origSize:rawBytes.length,compSize:(cmp||rawBytes).length,compressionRatio:compRatio
+    });
+    A.totalSize+=file.size;A.totalChunks+=chunks.length;A.routedCount++;
+    A.sealedAt=null;A.parity=null;refresh();return;
+  }
+
+
+/* ── nativePdfText — zero-dependency PDF text extraction ─────────────────
+   Handles: FlateDecode content streams, Tj / TJ operators,
+            literal strings (with octal / escape), hex strings.
+   Falls through (returns null) for: encrypted PDFs, image-only,
+   broken streams — caller routes to passthrough in that case.
+   Uses DecompressionStream (deflate-raw) — available in all modern browsers.
+   ConsciousNode SoftWorks · v1.0 · 2026-05-30                            */
+
+
 
   /* ── PDF — PDF.js text extraction → ROSA-ANS + chunked fingerprinting ── */
   if(route===ROUTE_PDF){
@@ -2498,26 +2512,86 @@ function ternaryUnpack(packed){const fp=new Float32Array(128);for(let i=0;i<32;i
 /* ROSA-ANS Decoder (seed reader copy) */
 function _deserializeFreq(buf){const freq=new Uint32Array(256);for(let i=0;i<256;i++){freq[i]=buf[i]||1;}return freq;}
 function _buildCumFreq(freq){const cum=new Uint32Array(257);let total=0;for(let i=0;i<256;i++)total+=freq[i];let s=0;for(let i=0;i<256;i++){cum[i]=s;s+=freq[i];}cum[256]=total;return{cum,total};}
-function rosaANSDecompress(compressed){
-  if(compressed.length===0)return new Uint8Array(0);
-  if(compressed[0]!==0xC5||compressed[1]!==0x17)return compressed;// not compressed, return as-is
-  const origLen=(compressed[2]<<24)|(compressed[3]<<16)|(compressed[4]<<8)|compressed[5];
-  const freqBuf=compressed.slice(6,262);
-  const stream=compressed.slice(262);
-  const freq=_deserializeFreq(freqBuf);
-  const{cum,total}=_buildCumFreq(freq);
-  const L=1<<23;
-  let pos=0;
-  let state=(stream[pos]<<24)|(stream[pos+1]<<16)|(stream[pos+2]<<8)|stream[pos+3];pos+=4;
-  const out=new Uint8Array(origLen);
-  for(let i=0;i<origLen;i++){
-    const slot=state%total;
-    let lo=0,hi=255;
-    while(lo<hi){const mid=(lo+hi+1)>>1;if(cum[mid]<=slot)lo=mid;else hi=mid-1;}
-    const s=lo;out[i]=s;
-    const fs=freq[s],cs=cum[s];
-    state=fs*Math.floor(state/total)+(slot-cs);
-    while(state<L&&pos<stream.length){state=(state<<8)|stream[pos++];}
+async function rosaANSDecompress(compressed){
+  if (wasmBootPromise) await wasmBootPromise;
+  const wasmResult = await rosaANSDecompressWasm(compressed);
+  if (wasmResult !== null) return wasmResult;
+  return jsANSDecompress(compressed);
+}
+function jsANSCompress(bytes) {
+  // Build frequency table — count how often each byte value appears
+  const freq = new Uint32Array(256).fill(1); // floor at 1 so no symbol has 0 probability
+  for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
+
+  // Normalize to sum exactly 256 — same as WASM codec normalization
+  const total = freq.reduce((a, b) => a + b, 0);
+  const norm = Array.from(freq).map(f => Math.max(1, Math.floor(f * 256 / total)));
+  let diff = 256 - norm.reduce((a, b) => a + b, 0);
+  const order = Array.from({length:256},(_,i)=>i)
+    .sort((a,b) => (freq[b]*256/total - norm[b]) - (freq[a]*256/total - norm[a]));
+  for (let i = 0; i < Math.abs(diff); i++) norm[order[i]] += (diff > 0 ? 1 : -1);
+
+  // Build cumulative table — running sum of frequencies
+  const cum = new Uint32Array(257);
+  for (let i = 0; i < 256; i++) cum[i + 1] = cum[i] + norm[i];
+
+  // rANS encode — process bytes in reverse (ANS encodes backwards)
+  const L = 32768; // normalisation interval lower bound
+  let state = L;
+  const out = [];
+  for (let i = bytes.length - 1; i >= 0; i--) {
+    const s = bytes[i], f = norm[s], c = cum[s];
+    // Flush low bits until state fits in normalisation interval
+    while (state >= f << 15) { out.push(state & 0xff); state >>= 8; }
+    // Encode: advance state using the symbol's frequency and cumulative
+    state = Math.floor(state / f) * 256 + c + (state % f);
+  }
+  // Flush final state (4 bytes, big-endian)
+  out.push(state & 0xff, (state >> 8) & 0xff, (state >> 16) & 0xff, (state >> 24) & 0xff);
+  out.reverse(); // ANS bitstream is reversed at output
+
+  // Package: magic + orig_len + freq[256] + bitstream
+  const stream = new Uint8Array(out);
+  const result = new Uint8Array(262 + stream.length);
+  result[0] = 0xC5; result[1] = 0x17;
+  const L2 = bytes.length;
+  result[2]=(L2>>24)&0xff; result[3]=(L2>>16)&0xff;
+  result[4]=(L2>>8)&0xff;  result[5]=L2&0xff;
+  for (let i = 0; i < 256; i++) result[6 + i] = norm[i];
+  result.set(stream, 262);
+  return result;
+}
+function jsANSDecompress(compressed) {
+  if (compressed[0] !== 0xC5 || compressed[1] !== 0x17) return null;
+  const origLen = (compressed[2]<<24)|(compressed[3]<<16)|(compressed[4]<<8)|compressed[5];
+  const norm = Array.from(compressed.slice(6, 262));
+  const cum = new Uint32Array(257);
+  for (let i = 0; i < 256; i++) cum[i + 1] = cum[i] + norm[i];
+
+  // Build decode table — map cumulative position back to symbol (binary search)
+  const stream = compressed.slice(262);
+  let pos = 0;
+  // Read initial state (4 bytes big-endian from start of stream)
+  let state = (stream[pos]<<24)|(stream[pos+1]<<16)|(stream[pos+2]<<8)|stream[pos+3];
+  pos += 4;
+
+  const out = new Uint8Array(origLen);
+  const L = 32768;
+  for (let i = 0; i < origLen; i++) {
+    // Binary search for symbol whose cumulative range contains (state % 256)
+    const slot = state & 0xff;
+    let lo = 0, hi = 255;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cum[mid] <= slot) lo = mid; else hi = mid - 1;
+    }
+    out[i] = lo;
+    const f = norm[lo], c = cum[lo];
+    state = f * (state >> 8) + slot - c;
+    // Refill state from bitstream when it drops below normalisation interval
+    while (state < L && pos < stream.length) {
+      state = (state << 8) | stream[pos++];
+    }
   }
   return out;
 }
@@ -2655,7 +2729,7 @@ function extr(id){
   if(f.stored){
     const bin=atob(f.stored);const raw=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++)raw[i]=bin.charCodeAt(i);
-    try{bytes=f.ansCompressed?rosaANSDecompress(raw):raw;}catch(e){bytes=raw;}
+    try{bytes=f.ansCompressed?await rosaANSDecompress(raw):raw;}catch(e){bytes=raw;}
   }else if(f.fullText){
     bytes=new TextEncoder().encode(f.fullText);
   }else return;
@@ -2754,7 +2828,15 @@ async function doExp(){
   A.sealedAt=payload.cns_header.sealed;A.parity='ok';
   updateSealBadge();
   // Capture the live FPSS source — embedded in every .cns so the recipient gets the full app
-  const fpssB64=btoa(unescape(encodeURIComponent(document.documentElement.outerHTML)));
+  const htmlString = document.documentElement.outerHTML;
+  const encoder = new TextEncoder();
+  const data = encoder.encode(htmlString);
+  let binary = '';
+  const chunkSize = 8192;
+  for (let i = 0; i < data.length; i += chunkSize) {
+    binary += String.fromCharCode.apply(null, data.subarray(i, i + chunkSize));
+  }
+  const fpssB64 = btoa(binary);
   if(pw){
     const json=JSON.stringify(payload),enc=new TextEncoder();
     const salt=crypto.getRandomValues(new Uint8Array(16)),iv=crypto.getRandomValues(new Uint8Array(12));
@@ -2996,6 +3078,14 @@ function refresh(){
   // Auto-fire optimizer when H¹ is above threshold and cooldown has elapsed
   if(A.files.length>0&&A.autopoietic.shouldFire(norm,A.sheaf._step)){
     A.autopoietic.fire(A.sheaf,h1Result,A.files);
+    if (A.autopoietic.totalFires > 0 && typeof activeTab !== 'undefined' && activeTab !== 'auto') {
+      const statusDiv = document.getElementById('h1-txt');
+      if (statusDiv) {
+        const oldTxt = statusDiv.textContent;
+        statusDiv.textContent = `⚡ Autopoiesis fired (H¹=${h1Result.norm.toFixed(3)})`;
+        setTimeout(() => { if (statusDiv.textContent.includes('Autopoiesis')) statusDiv.textContent = oldTxt; }, 2000);
+      }
+    }
   }
   if(activeTab==='auto')renderAutopoiesis();
 }
@@ -3195,6 +3285,21 @@ function makePayload(size, type) {
 
 let benchRunning = false;
 
+async function measure(payload, compressFn, decompressFn, iterations=5) {
+  const compTimes = [], decompTimes = [];
+  for (let i = 0; i < iterations; i++) {
+    let t = performance.now();
+    const compressed = await compressFn(payload);
+    compTimes.push(performance.now() - t);
+    t = performance.now();
+    await decompressFn(compressed);
+    decompTimes.push(performance.now() - t);
+  }
+  compTimes.sort((a,b)=>a-b);
+  decompTimes.sort((a,b)=>a-b);
+  return { comp: compTimes[Math.floor(iterations/2)], decomp: decompTimes[Math.floor(iterations/2)] };
+}
+
 async function runBench() {
   if (benchRunning) return;
   benchRunning = true;
@@ -3210,13 +3315,14 @@ async function runBench() {
     { label: '10 KB', bytes: 10_000, type: 'mixed' },
   ];
 
-  // Boot the WASM codec first
   status.textContent = 'Booting WASM codec…';
-  await _bootWasmCodec();
+  if (typeof _bootWasmCodec === 'function') {
+      await _bootWasmCodec();
+  }
 
-  const wasmOk = !!_wasmCodec;
+  const wasmOk = !!(typeof _wasmCodec !== 'undefined' && _wasmCodec);
   status.textContent = wasmOk
-    ? `WASM codec online ✓ — running single-pass timing per size…`
+    ? `WASM codec online ✓ — running 5 iterations per size (median)`
     : `WASM unavailable — JS-only results`;
 
   const rows = [];
@@ -3226,97 +3332,41 @@ async function runBench() {
     status.textContent = `Benchmarking ${label} ${type} payload…`;
     await new Promise(r => setTimeout(r, 0));
 
-    // ── WASM path ──
-    let wasmCompMs = null, wasmDecompMs = null, wasmRatio = '—';
+    let jsComp = 0, jsDecomp = 0, wasmComp = 0, wasmDecomp = 0;
+
+    const jsRes = await measure(payload, jsANSCompress, jsANSDecompress, 5);
+    jsComp = jsRes.comp;
+    jsDecomp = jsRes.decomp;
+
     if (wasmOk) {
-      // warm-up
-      await rosaANSCompressWasm(payload);
-      await new Promise(r => setTimeout(r, 0));
-
-      let t0 = performance.now();
-      const wasmC = await rosaANSCompressWasm(payload);
-      wasmCompMs = (performance.now() - t0).toFixed(1);
-
-      if (wasmC) {
-        wasmRatio = (payload.length / wasmC.length).toFixed(2) + '×';
-        await new Promise(r => setTimeout(r, 0));
-        t0 = performance.now();
-        await rosaANSDecompressWasm(wasmC);
-        wasmDecompMs = (performance.now() - t0).toFixed(1);
-      }
+      const wasmRes = await measure(payload, rosaANSCompressWasm, rosaANSDecompressWasm, 5);
+      wasmComp = wasmRes.comp;
+      wasmDecomp = wasmRes.decomp;
     }
 
-    // ── JS path ──
-    await new Promise(r => setTimeout(r, 0));
-    // warm-up on half the payload
-    jsANSCompress(payload.slice(0, payload.length >> 1));
-    await new Promise(r => setTimeout(r, 0));
+    const cRatio = (jsComp / wasmComp).toFixed(1);
+    const dRatio = (jsDecomp / wasmDecomp).toFixed(1);
 
-    let t0 = performance.now();
-    const jsC = jsANSCompress(payload);
-    const jsCompMs = (performance.now() - t0).toFixed(1);
-
-    let jsDecompMs = null;
-    if (jsC) {
-      await new Promise(r => setTimeout(r, 0));
-      t0 = performance.now();
-      jsANSDecompress(jsC);
-      jsDecompMs = (performance.now() - t0).toFixed(1);
-    }
-
-    const compSpeedup  = wasmOk && wasmCompMs
-      ? (parseFloat(jsCompMs)   / parseFloat(wasmCompMs)).toFixed(1)  + '×' : '—';
-    const decompSpeedup = wasmOk && wasmDecompMs && jsDecompMs
-      ? (parseFloat(jsDecompMs) / parseFloat(wasmDecompMs)).toFixed(1) + '×' : '—';
-
-    rows.push({label, type, bytes: payload.length,
-      wasmComp: wasmCompMs, wasmDecomp: wasmDecompMs,
-      jsComp: jsCompMs, jsDecomp: jsDecompMs,
-      compSpeedup, decompSpeedup, ratio: wasmRatio});
+    rows.push(`
+      <div style="background:var(--bg3);border:1px solid var(--border);border-radius:4px;padding:8px 10px;margin-bottom:8px;">
+        <div style="font-family:var(--mono);font-size:11px;color:var(--amber);margin-bottom:6px;font-weight:700">${label} (${type})</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:10px;color:var(--muted);">
+          <div>
+            <span style="color:var(--text)">JS:</span> Comp ${jsComp.toFixed(1)}ms · Decomp ${jsDecomp.toFixed(1)}ms
+          </div>
+          <div>
+            <span style="color:var(--text)">WASM:</span> Comp ${wasmOk?wasmComp.toFixed(1):'—'}ms · Decomp ${wasmOk?wasmDecomp.toFixed(1):'—'}ms
+          </div>
+        </div>
+        ${wasmOk ? `<div style="font-size:10px;color:var(--teal);margin-top:6px;border-top:1px solid var(--border);padding-top:4px;">
+          WASM Speedup: <strong style="color:var(--ok)">${cRatio}x</strong> comp · <strong style="color:var(--ok)">${dRatio}x</strong> decomp
+        </div>` : ''}
+      </div>
+    `);
   }
 
-  status.textContent = `Done — single-pass timing, each path run once after warm-up.`;
-
-  // ── Render results ──────────────────────────────────────
-  results.innerHTML = rows.map(r => {
-    const speedF = parseFloat(r.compSpeedup);
-    const color = !wasmOk ? 'var(--muted)' : speedF >= 5 ? '#86efac' : speedF >= 2 ? 'var(--amber)' : 'var(--err)';
-    return `
-    <div style="background:var(--bg2);border:1px solid var(--border);border-radius:var(--r);padding:13px 16px;margin-bottom:10px;">
-      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;">
-        <span style="font-family:var(--mono);font-size:12px;font-weight:800;color:var(--text)">${r.label}</span>
-        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">${r.type} payload</span>
-        <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">compression: <span style="color:var(--amber)">${r.ratio}</span></span>
-        <span style="margin-left:auto;font-family:var(--mono);font-size:11px;font-weight:800;color:${color}">
-          ${wasmOk ? r.compSpeedup + ' faster (compress)' : 'WASM unavailable'}
-        </span>
-      </div>
-      <table style="width:100%;border-collapse:collapse;font-family:var(--mono);font-size:10px;">
-        <tr style="color:var(--muted);font-size:9px;letter-spacing:.2em;text-transform:uppercase;">
-          <td style="padding:4px 8px;">path</td>
-          <td style="padding:4px 8px;text-align:right;">compress (ms)</td>
-          <td style="padding:4px 8px;text-align:right;">decompress (ms)</td>
-          <td style="padding:4px 8px;text-align:right;">compress speedup</td>
-          <td style="padding:4px 8px;text-align:right;">decompress speedup</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border);">
-          <td style="padding:5px 8px;color:#86efac;font-weight:700;">WASM</td>
-          <td style="padding:5px 8px;text-align:right;color:var(--text)">${r.wasmComp ?? '—'}</td>
-          <td style="padding:5px 8px;text-align:right;color:var(--text)">${r.wasmDecomp ?? '—'}</td>
-          <td style="padding:5px 8px;text-align:right;color:${color};font-weight:800">${r.compSpeedup}</td>
-          <td style="padding:5px 8px;text-align:right;color:${color};font-weight:800">${r.decompSpeedup}</td>
-        </tr>
-        <tr style="border-top:1px solid var(--border);">
-          <td style="padding:5px 8px;color:var(--muted);">JS</td>
-          <td style="padding:5px 8px;text-align:right;color:var(--muted)">${r.jsComp}</td>
-          <td style="padding:5px 8px;text-align:right;color:var(--muted)">${r.jsDecomp}</td>
-          <td style="padding:5px 8px;text-align:right;color:var(--muted)">1.0×</td>
-          <td style="padding:5px 8px;text-align:right;color:var(--muted)">1.0×</td>
-        </tr>
-      </table>
-    </div>`;
-  }).join('');
-
+  results.innerHTML = rows.join('');
+  status.textContent = 'Benchmark complete.';
   btn.style.opacity = '1';
   benchRunning = false;
 }
