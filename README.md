@@ -42,6 +42,20 @@ The name is accurate: the archive converges on a stable neural representation of
 
 ## Changelog
 
+### v1.0.3 — 2026-10-11 · Kehai Interim
+
+Five stacked bugs, found by running the full ingest → extract → export → open-archive → re-import loop in a real browser. Each one hid the next.
+
+- **Codec crashed on ordinary text.** Frequencies were normalized to a 256 total with all 256 byte values floored at 1, which leaves no room: real text ended up with 68–120 *present* bytes at frequency 0. Encoding a zero-frequency byte never terminates (the WASM loop ran off its memory with "memory access out of bounds"; the JS fallback would spin forever). Now absent bytes get 0 and every present byte gets ≥ 1, and a one-symbol file is handled. Stream format and the 968-byte WASM binary are unchanged, so existing archives still decode.
+- **One failed file jammed the queue.** `ingesting` stayed `true` after an exception, so every later drop was silently ignored until reload. Each file is now isolated in try/catch, with try/finally around the queue.
+- **The app could not extract compressed files.** `extractFile` called `rosaANSDecompress`, which only existed inside the seed-reader template. Added to the app.
+- **Every exported .cns since v1.0.1 had a broken reader script.** Escapes inside the seed-reader template literal collapsed (`'\n'` became a raw newline, `\'` became `'`), so the archive's script failed to parse. Fixed, plus `extr` made `async` and the reader pointed at the JS decoder it actually carries. The Windows launcher's `%FILE:\=/%` also lost its backslash; fixed.
+- **Exported archives dropped the `ansCompressed` flag**, so readers handed back still-compressed bytes. The flag is now exported; older archives are detected by the codec's magic bytes (`C5 17`).
+
+**Honest numbers:** the codec is a static order-0 byte model with 8-bit precision feeding rANS. On real text it gives 1.4–1.6× (gzip: 2.0–4.6×). ROSA is not in the loop yet. Making it so (ROSA's predicted next byte as a context for an adaptive coder) is the real ROSA-ANS experiment.
+
+**Tests (new):** `node tests/codec.js [files…]` round-trips edge cases plus 1,000 fuzzed inputs through both the JS and WASM codecs, using the code in `index.html`.
+
 ### v1.0.1 — 2026-06-07
 
 Three post-release bug fixes, all targeting the self-propagation pipeline:

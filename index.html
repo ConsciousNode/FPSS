@@ -1489,13 +1489,25 @@ async function _bootWasmCodec() {
 
 /* Normalize raw freq (Uint32Array from WASM) to sum exactly 256 */
 function _normalizeFreq(freq32) {
-  const total = Array.from(freq32).reduce((a,b)=>a+b,0);
-  const norm = Array.from(freq32).map(f=>Math.max(1, Math.floor(f*256/total)));
-  let diff = 256 - norm.reduce((a,b)=>a+b,0);
-  const order = Array.from({length:256},(_,i)=>i).sort((a,b)=>
-    (freq32[b]*256/total - norm[b]) - (freq32[a]*256/total - norm[a]));
-  for(let i=0;i<Math.abs(diff);i++) norm[order[i]] += (diff>0?1:-1);
-  let s=norm.reduce((a,b)=>a+b,0); if(s!==256) norm[order[0]]+=(256-s);
+  // WASM build_freq starts every slot at 1, so subtract that back out.
+  const freq = Array.from(freq32, f => Math.max(0, f - 1));
+  // Normalize to sum exactly 256. Absent bytes get 0; every present byte gets >= 1.
+  // (v1.0.3: the old floor-at-1-for-all-256 left no room in a 256 total, so
+  //  present bytes were pushed to 0 — and encoding a 0-frequency byte never
+  //  terminates: the JS loop spins, the WASM loop runs off its memory.)
+  const norm = new Array(256).fill(0);
+  let present = 0, total = 0;
+  for (let i = 0; i < 256; i++) if (freq[i] > 0) { present++; total += freq[i]; }
+  const spare = 256 - present, rem = [];
+  let used = 0;
+  for (let i = 0; i < 256; i++) if (freq[i] > 0) {
+    const share = freq[i] * spare / total, fl = Math.floor(share);
+    norm[i] = 1 + fl; used += 1 + fl; rem.push([share - fl, i]);
+  }
+  rem.sort((a, b) => b[0] - a[0]);
+  for (let k = 0; used < 256 && k < rem.length; k++) { norm[rem[k][1]]++; used++; }
+  // A one-symbol input would get 256, which does not fit the 1-byte table: lend 1 to a neighbour.
+  for (let i = 0; i < 256; i++) if (norm[i] > 255) { norm[i] = 255; norm[i ^ 1] += 1; }
   return norm;
 }
 
@@ -1569,6 +1581,13 @@ async function rosaANSCompress(bytes){
   const wasmResult=await rosaANSCompressWasm(bytes);
   if(wasmResult!==null)return wasmResult;
   return jsANSCompress(bytes);
+}
+// v1.0.3: the app's own extractFile() calls rosaANSDecompress, which until now
+// existed only inside the seed-reader template — extraction threw ReferenceError.
+async function rosaANSDecompress(compressed){
+  const wasmResult=await rosaANSDecompressWasm(compressed);
+  if(wasmResult!==null)return wasmResult;
+  return jsANSDecompress(compressed);
 }
 
 
@@ -1838,9 +1857,17 @@ async function handleFiles(files){
   }
   const pg=document.getElementById('pg');
   const prefix=(document.getElementById('pp').value||'').trim().replace(/\/+$/,'');
-  for(let i=0;i<arr.length;i++){pg.style.width=((i/arr.length)*100)+'%';await ingest(arr[i],prefix);await new Promise(r=>setTimeout(r,0));}
-  pg.style.width='100%';setTimeout(()=>pg.style.width='0%',700);
-  ingesting=false;
+  try{
+    for(let i=0;i<arr.length;i++){
+      pg.style.width=((i/arr.length)*100)+'%';
+      // v1.0.3: one bad file must not jam the queue (ingesting used to stay true forever)
+      try{await ingest(arr[i],prefix);}catch(e){console.error('[FPSS] ingest failed:',arr[i].name,e);alert('Could not ingest '+arr[i].name+': '+(e&&e.message||e));}
+      await new Promise(r=>setTimeout(r,0));
+    }
+  }finally{
+    pg.style.width='100%';setTimeout(()=>pg.style.width='0%',700);
+    ingesting=false;
+  }
 }
 
 function _pdfFindBytes(src,from,pat){
@@ -2204,7 +2231,7 @@ async function buildPayload(name){
     entries:A.files.map(f=>({
       id:f.id,filename:f.filename,path:f.path||f.filename,size:f.size,type:f.type,ts:f.ts,
       route:f.route,passthrough:f.passthrough,
-      stored:f.stored,fullText:f.fullText,
+      stored:f.stored,fullText:f.fullText,ansCompressed:!!f.ansCompressed,
       chunks:f.chunks,packedFps:f.packedFps,
       thumbnail:f.thumbnail||null,
       imageW:f.imageW||0,imageH:f.imageH||0,gridW:f.gridW||0,gridH:f.gridH||0,
@@ -2236,6 +2263,8 @@ async function restorePayload(data){
     id:e.id,filename:e.filename,path:e.path||'/',size:e.size,type:e.type,ts:e.ts,
     route:e.route||ROUTE_TEXT,passthrough:!!e.passthrough,
     stored:e.stored||'',fullText:e.fullText||'',
+    // v1.0.3: archives before this version never recorded the flag — fall back to the codec's magic bytes
+    ansCompressed:e.ansCompressed!==undefined?!!e.ansCompressed:(()=>{try{const b=atob((e.stored||'').slice(0,4));return b.charCodeAt(0)===0xC5&&b.charCodeAt(1)===0x17;}catch(_){return false;}})(),
     chunks:e.chunks||[],packedFps:e.packedFps||[],
     thumbnail:e.thumbnail||null,
     imageW:e.imageW||0,imageH:e.imageH||0,gridW:e.gridW||0,gridH:e.gridH||0,
@@ -2463,17 +2492,16 @@ function getLauncher(platform){
       +')'+CR
       +'for %%X in (chrome.exe) do (set CHROME=%%~$PATH:X)'+CR
       +'if defined CHROME ('+CR
-      +'  start "" "%CHROME%" --app="file:///%FILE:\\=/%" --window-size=960,680 --window-position=80,60'+CR
+      +'  start "" "%CHROME%" --app="file:///%FILE:\\\\=/%" --window-size=960,680 --window-position=80,60'+CR
       +'  exit /b'+CR
       +')'+CR
       +'for %%X in (chromium.exe chromium-browser.exe) do (set CHROME=%%~$PATH:X)'+CR
       +'if defined CHROME ('+CR
-      +'  start "" "%CHROME%" --app="file:///%FILE:\\=/%" --window-size=960,680'+CR
+      +'  start "" "%CHROME%" --app="file:///%FILE:\\\\=/%" --window-size=960,680'+CR
       +'  exit /b'+CR
       +')'+CR
       +'where firefox >nul 2>&1 && start "" firefox "%FILE%" && exit /b'+CR
       +'start "" "%FILE%"'+CR;
-    content=content.replace(/\\r\\n/g,'\r\n');
   }else{
     ext='sh';mime='text/plain';
     var NL='\\n';
@@ -2497,7 +2525,6 @@ function getLauncher(platform){
       +'  exit 0'+NL
       +'fi'+NL
       +'xdg-open "$FILE"'+NL;
-    content=content.replace(/\\n/g,'\n');
   }
   var a=document.createElement('a');
   a.href=URL.createObjectURL(new Blob([content],{type:mime}));
@@ -2513,23 +2540,33 @@ function ternaryUnpack(packed){const fp=new Float32Array(128);for(let i=0;i<32;i
 function _deserializeFreq(buf){const freq=new Uint32Array(256);for(let i=0;i<256;i++){freq[i]=buf[i]||1;}return freq;}
 function _buildCumFreq(freq){const cum=new Uint32Array(257);let total=0;for(let i=0;i<256;i++)total+=freq[i];let s=0;for(let i=0;i<256;i++){cum[i]=s;s+=freq[i];}cum[256]=total;return{cum,total};}
 async function rosaANSDecompress(compressed){
-  if (wasmBootPromise) await wasmBootPromise;
-  const wasmResult = await rosaANSDecompressWasm(compressed);
-  if (wasmResult !== null) return wasmResult;
+  // v1.0.3: the seed reader carries only the pure-JS decoder (no WASM codec,
+  // no wasmBootPromise) — the old call threw and extr() silently returned the
+  // still-compressed bytes.
   return jsANSDecompress(compressed);
 }
 function jsANSCompress(bytes) {
   // Build frequency table — count how often each byte value appears
-  const freq = new Uint32Array(256).fill(1); // floor at 1 so no symbol has 0 probability
+  const freq = new Uint32Array(256); // true counts; absent bytes stay 0
   for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
 
-  // Normalize to sum exactly 256 — same as WASM codec normalization
-  const total = freq.reduce((a, b) => a + b, 0);
-  const norm = Array.from(freq).map(f => Math.max(1, Math.floor(f * 256 / total)));
-  let diff = 256 - norm.reduce((a, b) => a + b, 0);
-  const order = Array.from({length:256},(_,i)=>i)
-    .sort((a,b) => (freq[b]*256/total - norm[b]) - (freq[a]*256/total - norm[a]));
-  for (let i = 0; i < Math.abs(diff); i++) norm[order[i]] += (diff > 0 ? 1 : -1);
+  // Normalize to sum exactly 256. Absent bytes get 0; every present byte gets >= 1.
+  // (v1.0.3: the old floor-at-1-for-all-256 left no room in a 256 total, so
+  //  present bytes were pushed to 0 — and encoding a 0-frequency byte never
+  //  terminates: the JS loop spins, the WASM loop runs off its memory.)
+  const norm = new Array(256).fill(0);
+  let present = 0, total = 0;
+  for (let i = 0; i < 256; i++) if (freq[i] > 0) { present++; total += freq[i]; }
+  const spare = 256 - present, rem = [];
+  let used = 0;
+  for (let i = 0; i < 256; i++) if (freq[i] > 0) {
+    const share = freq[i] * spare / total, fl = Math.floor(share);
+    norm[i] = 1 + fl; used += 1 + fl; rem.push([share - fl, i]);
+  }
+  rem.sort((a, b) => b[0] - a[0]);
+  for (let k = 0; used < 256 && k < rem.length; k++) { norm[rem[k][1]]++; used++; }
+  // A one-symbol input would get 256, which does not fit the 1-byte table: lend 1 to a neighbour.
+  for (let i = 0; i < 256; i++) if (norm[i] > 255) { norm[i] = 255; norm[i ^ 1] += 1; }
 
   // Build cumulative table — running sum of frequencies
   const cum = new Uint32Array(257);
@@ -2651,7 +2688,7 @@ function sq(){
     const chunkHtml=h.route==='image'?thumb+'<div class="r-text" style="font-size:10px;opacity:.6">'+esc(h.chunk)+'</div>':
       '<div class="r-text">'+esc(h.chunk)+'</div>';
     return'<div class="r-card"><div class="r-head">'+rb+'<span class="r-file">'+esc(h.fn)+'</span>'
-      +'<button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extr(\''+h.fid+'\')">↓ extract</button>'
+      +'<button class="btn btn-t" style="font-size:9px;padding:3px 7px" onclick="extr(\\''+h.fid+'\\')">↓ extract</button>'
       +'<span class="r-score">'+h.score.toFixed(3)+'</span></div>'+chunkHtml+'</div>';
   }).join('')
   +(passFiles.length?'<div style="font-size:10px;color:#7a7498;margin-top:10px;padding:8px 0;border-top:1px solid #2a2640">'+passFiles.length+' passthrough file(s) — extract from Browse tab.</div>':'');
@@ -2668,7 +2705,7 @@ function renderBlist(){
       route==='audio'?(f.duration||0).toFixed(1)+'s':
       route==='weights'?(f.numParams||0).toLocaleString()+'p':
       (f.chunks||[]).length+' chunks';
-    return'<div class="bi'+(f.id===selFid?' sel':'')+'" onclick="selFile(\''+f.id+'\')">'
+    return'<div class="bi'+(f.id===selFid?' sel':'')+'" onclick="selFile(\\''+f.id+'\\')">'
       +'<div class="bn">'+esc(f.filename)+'</div>'
       +'<div class="bm">'+esc(meta)+'</div></div>';
   }).join('');
@@ -2722,14 +2759,16 @@ function selFile(id){
   }
 }
 
-function extr(id){
+async function extr(id){
   if(!D||!id)return;
   const f=D._files.find(x=>x.id===id);if(!f)return;
   let bytes;
   if(f.stored){
     const bin=atob(f.stored);const raw=new Uint8Array(bin.length);
     for(let i=0;i<bin.length;i++)raw[i]=bin.charCodeAt(i);
-    try{bytes=f.ansCompressed?await rosaANSDecompress(raw):raw;}catch(e){bytes=raw;}
+    // v1.0.3: older archives lack the ansCompressed flag — detect the codec's magic bytes instead
+    const isAns=f.ansCompressed!==undefined?!!f.ansCompressed:(raw[0]===0xC5&&raw[1]===0x17);
+    try{bytes=isAns?await rosaANSDecompress(raw):raw;}catch(e){bytes=raw;}
   }else if(f.fullText){
     bytes=new TextEncoder().encode(f.fullText);
   }else return;
@@ -3176,16 +3215,26 @@ async function loadCNS(inp){if(!inp.files[0])return;const pw=document.getElement
 /* This is the baseline. Same math, no native acceleration.   */
 function jsANSCompress(bytes) {
   // Build frequency table — count how often each byte value appears
-  const freq = new Uint32Array(256).fill(1); // floor at 1 so no symbol has 0 probability
+  const freq = new Uint32Array(256); // true counts; absent bytes stay 0
   for (let i = 0; i < bytes.length; i++) freq[bytes[i]]++;
 
-  // Normalize to sum exactly 256 — same as WASM codec normalization
-  const total = freq.reduce((a, b) => a + b, 0);
-  const norm = Array.from(freq).map(f => Math.max(1, Math.floor(f * 256 / total)));
-  let diff = 256 - norm.reduce((a, b) => a + b, 0);
-  const order = Array.from({length:256},(_,i)=>i)
-    .sort((a,b) => (freq[b]*256/total - norm[b]) - (freq[a]*256/total - norm[a]));
-  for (let i = 0; i < Math.abs(diff); i++) norm[order[i]] += (diff > 0 ? 1 : -1);
+  // Normalize to sum exactly 256. Absent bytes get 0; every present byte gets >= 1.
+  // (v1.0.3: the old floor-at-1-for-all-256 left no room in a 256 total, so
+  //  present bytes were pushed to 0 — and encoding a 0-frequency byte never
+  //  terminates: the JS loop spins, the WASM loop runs off its memory.)
+  const norm = new Array(256).fill(0);
+  let present = 0, total = 0;
+  for (let i = 0; i < 256; i++) if (freq[i] > 0) { present++; total += freq[i]; }
+  const spare = 256 - present, rem = [];
+  let used = 0;
+  for (let i = 0; i < 256; i++) if (freq[i] > 0) {
+    const share = freq[i] * spare / total, fl = Math.floor(share);
+    norm[i] = 1 + fl; used += 1 + fl; rem.push([share - fl, i]);
+  }
+  rem.sort((a, b) => b[0] - a[0]);
+  for (let k = 0; used < 256 && k < rem.length; k++) { norm[rem[k][1]]++; used++; }
+  // A one-symbol input would get 256, which does not fit the 1-byte table: lend 1 to a neighbour.
+  for (let i = 0; i < 256; i++) if (norm[i] > 255) { norm[i] = 255; norm[i ^ 1] += 1; }
 
   // Build cumulative table — running sum of frequencies
   const cum = new Uint32Array(257);
